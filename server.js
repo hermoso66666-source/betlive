@@ -17,6 +17,7 @@ app.use(helmet({contentSecurityPolicy:false}));
 app.use(express.json({limit:"20kb"}));
 app.use(cookieParser());
 
+if(!process.env.DATABASE_URL) console.warn("DATABASE_URL no configurado");
 const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==="production"?{rejectUnauthorized:false}:false});
 const JWT_SECRET=process.env.JWT_SECRET;
 if(!JWT_SECRET) console.warn("JWT_SECRET no configurado");
@@ -68,7 +69,6 @@ async function auth(req,res,next){
 function validateName(n){return typeof n==="string"&&n.trim().length>=2&&n.trim().length<=80}
 function validatePassword(p){return typeof p==="string"&&p.length>=8&&p.length<=128}
 
-app.get("/api/health",(req,res)=>res.json({ok:true}));
 app.post("/api/auth/register",authLimiter,async(req,res)=>{
  try{
   const name=req.body.name?.trim(), email=cleanEmail(req.body.email), phone=cleanPhone(req.body.phone), password=req.body.password;
@@ -116,5 +116,21 @@ app.post("/api/tickets",auth,ticketLimiter,async(req,res)=>{
 });
 
 app.use(express.static(path.join(__dirname,".")));
-app.get("*",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
-dbInit().then(()=>app.listen(PORT,()=>console.log("BetLive API escuchando en "+PORT))).catch(e=>{console.error(e);process.exit(1)});
+app.get("/{*splat}",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
+let dbReady=false;
+
+app.get("/api/health",(req,res)=>{
+  res.status(200).json({ok:true,database:dbReady});
+});
+
+app.listen(PORT,()=>{
+  console.log("BetLive API escuchando en "+PORT);
+  dbInit()
+    .then(()=>{
+      dbReady=true;
+      console.log("Base de datos inicializada correctamente");
+    })
+    .catch(e=>{
+      console.error("Error inicializando la base de datos:",e);
+    });
+});;
