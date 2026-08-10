@@ -1,7 +1,7 @@
-# BetLive V2
-Interfaz original de sportsbook virtual inspirada en patrones comunes de casas de apuestas modernas: navegación por deportes, LIVE, filtros, eventos compactos, momios y boleto.
+# BetLive V3
 
-No copia logotipos, imágenes, textos propietarios ni código de terceros. Solo usa créditos ficticios y no integra dinero real, depósitos o retiros.
+Incluye boleto de apuesta rápida funcional, login, registro rápido por correo/teléfono, botones preparados para Google/Facebook y saldo visible arriba a la izquierda.
 
-## GitHub + Render
-Sube los archivos al repositorio y Render puede desplegarlo como Static Site. Publish Directory: `.` y Build Command vacío.
+**Seguridad:** esta es una demo frontend. No uses contraseñas reales ni dinero real. Google/Facebook requieren OAuth/OIDC en backend. Para producción: sesiones HttpOnly/Secure, CSRF, rate limiting, validación server-side, MFA, Argon2id/bcrypt y saldo gestionado exclusivamente en servidor/base de datos.
+
+Sube los archivos al repositorio de GitHub y Render desplegará la actualización.
