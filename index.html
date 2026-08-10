@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b0d">
+  <title>BetLive — Apuestas virtuales en vivo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <button class="icon-btn" id="menuBtn" aria-label="Menú">☰</button>
+      <div class="brand">BET<span>LIVE</span><small>VIRTUAL</small></div>
+      <div class="top-actions">
+        <div class="balance"><small>Saldo virtual</small><strong id="balance">$10,000.00</strong></div>
+        <button class="avatar" id="profileBtn">C</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-view="live">🔴 En vivo</button>
+      <button class="tab" data-view="sports">⚽ Deportes</button>
+      <button class="tab" data-view="bets">🎟 Mis apuestas</button>
+    </nav>
+
+    <main class="content">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">SPORTSBOOK VIRTUAL</p>
+          <h1>Apuestas en vivo</h1>
+          <p class="muted">Eventos simulados, cuotas dinámicas y saldo ficticio.</p>
+        </div>
+        <div class="live-pill"><i></i> LIVE</div>
+      </section>
+
+      <section id="liveView" class="view">
+        <div class="section-head">
+          <h2>Eventos en vivo</h2>
+          <span id="eventCount">0 eventos</span>
+        </div>
+        <div id="matches" class="matches"></div>
+      </section>
+
+      <section id="sportsView" class="view hidden">
+        <div class="section-head"><h2>Deportes</h2></div>
+        <div class="sport-grid">
+          <button class="sport-card" data-sport="Fútbol">⚽<b>Fútbol</b><small>En vivo</small></button>
+          <button class="sport-card" data-sport="Básquetbol">🏀<b>Básquetbol</b><small>Próximamente</small></button>
+          <button class="sport-card" data-sport="Tenis">🎾<b>Tenis</b><small>Próximamente</small></button>
+          <button class="sport-card" data-sport="Béisbol">⚾<b>Béisbol</b><small>Próximamente</small></button>
+        </div>
+      </section>
+
+      <section id="betsView" class="view hidden">
+        <div class="section-head"><h2>Mis apuestas</h2></div>
+        <div id="history" class="history"></div>
+      </section>
+    </main>
+
+    <aside class="slip" id="slip">
+      <div class="slip-head">
+        <div><h3>🎟 Cupón</h3><span id="slipCount">0 selecciones</span></div>
+        <button id="clearSlip" class="text-btn">Limpiar</button>
+      </div>
+      <div id="slipItems" class="slip-items">
+        <div class="empty">Selecciona una cuota para agregarla al cupón.</div>
+      </div>
+      <div class="slip-bottom">
+        <label>Monto virtual</label>
+        <div class="stake-row">
+          <span>$</span><input id="stake" type="number" min="1" step="1" value="100">
+        </div>
+        <div class="summary"><span>Cuota total</span><strong id="totalOdds">0.00</strong></div>
+        <div class="summary"><span>Ganancia potencial</span><strong id="potential">$0.00</strong></div>
+        <button id="placeBet" class="primary" disabled>CONFIRMAR APUESTA</button>
+        <small class="disclaimer">Solo créditos virtuales. No hay dinero real ni retiros.</small>
+      </div>
+    </aside>
+
+    <div class="drawer hidden" id="drawer">
+      <div class="drawer-panel">
+        <button class="close" id="closeDrawer">×</button>
+        <div class="brand big">BET<span>LIVE</span></div>
+        <p class="muted">Panel de demostración</p>
+        <button class="drawer-link" data-view="live">🔴 En vivo</button>
+        <button class="drawer-link" data-view="sports">⚽ Deportes</button>
+        <button class="drawer-link" data-view="bets">🎟 Mis apuestas</button>
+        <hr>
+        <button class="drawer-link" id="resetBtn">↻ Reiniciar saldo demo</button>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
