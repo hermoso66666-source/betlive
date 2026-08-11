@@ -22,6 +22,10 @@ const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.N
 const JWT_SECRET=process.env.JWT_SECRET;
 if(!JWT_SECRET) console.warn("JWT_SECRET no configurado");
 const PORT=process.env.PORT||10000;
+const API_FOOTBALL_KEY=process.env.API_FOOTBALL_KEY||"";
+const API_FOOTBALL_BASE=(process.env.API_FOOTBALL_BASE_URL||"https://v3.football.api-sports.io").replace(/\/$/,"");
+const LIVE_SYNC_ENABLED=String(process.env.LIVE_SYNC_ENABLED??"true").toLowerCase()!=="false";
+const LIVE_SYNC_INTERVAL_MS=Math.max(15000,Number(process.env.LIVE_SYNC_INTERVAL_MS||60000));
 const authLimiter=rateLimit({windowMs:15*60*1000,max:40,standardHeaders:true,legacyHeaders:false});
 const ticketLimiter=rateLimit({windowMs:60*1000,max:20,standardHeaders:true,legacyHeaders:false});
 
@@ -53,6 +57,12 @@ async function dbInit(){
    featured BOOLEAN NOT NULL DEFAULT FALSE,video BOOLEAN NOT NULL DEFAULT FALSE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
  );
  CREATE INDEX IF NOT EXISTS idx_events_start ON sports_events(starts_at);
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS external_source VARCHAR(30) NOT NULL DEFAULT 'LOCAL';
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS external_id VARCHAR(100);
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS live_elapsed INT;
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS live_status VARCHAR(100) DEFAULT '';
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
+ CREATE UNIQUE INDEX IF NOT EXISTS uq_sports_events_external ON sports_events(external_source,external_id) WHERE external_id IS NOT NULL;
  CREATE TABLE IF NOT EXISTS markets(
    id UUID PRIMARY KEY,event_id UUID NOT NULL REFERENCES sports_events(id) ON DELETE CASCADE,name VARCHAR(100) NOT NULL,market_type VARCHAR(40) NOT NULL,
    status VARCHAR(20) NOT NULL DEFAULT 'OPEN',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -62,6 +72,10 @@ async function dbInit(){
    odds NUMERIC(10,3) NOT NULL CHECK(odds>1),status VARCHAR(20) NOT NULL DEFAULT 'OPEN',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
  );
  CREATE INDEX IF NOT EXISTS idx_market_sel_market ON market_selections(market_id);
+ ALTER TABLE markets ADD COLUMN IF NOT EXISTS external_key VARCHAR(160);
+ CREATE UNIQUE INDEX IF NOT EXISTS uq_markets_external_key ON markets(external_key) WHERE external_key IS NOT NULL;
+ ALTER TABLE market_selections ADD COLUMN IF NOT EXISTS external_key VARCHAR(240);
+ CREATE UNIQUE INDEX IF NOT EXISTS uq_market_selections_external_key ON market_selections(external_key) WHERE external_key IS NOT NULL;
  CREATE TABLE IF NOT EXISTS tickets(
    id UUID PRIMARY KEY,user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,stake_cents BIGINT NOT NULL CHECK(stake_cents>0),
    total_odds NUMERIC(10,3) NOT NULL CHECK(total_odds>0),potential_cents BIGINT NOT NULL CHECK(potential_cents>=0),
@@ -376,7 +390,7 @@ app.post("/api/auth/logout",auth,(req,res)=>{res.clearCookie("bl_session",{httpO
 app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 
 // Public catalog
-app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 200`);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
+app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 200`);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
 app.get("/api/quinielas",async(req,res)=>{const {rows}=await pool.query("SELECT id,name,kind,price_cents,description,active,close_at,prize_text FROM quinielas WHERE active=TRUE ORDER BY price_cents");res.json({quinielas:rows})});
 
 // Tickets: server validates selected odds against DB
@@ -548,12 +562,151 @@ app.post("/api/admin/support/:userId/messages",auth,requireAdmin,async(req,res)=
 
 app.get("/api/admin/audit",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT a.id,a.action,a.target_type,a.target_id,a.details,a.created_at,COALESCE(u.name,'Sistema') admin_name FROM admin_audit a LEFT JOIN users u ON u.id=a.admin_id ORDER BY a.created_at DESC LIMIT 300`);res.json({audit:rows})});
 
+
+// Real live football feed from API-Football.
+// The API key is read only from Render/server environment variables.
+function deterministicUuid(value){
+  const h=crypto.createHash("sha1").update(String(value)).digest();
+  h[6]=(h[6]&0x0f)|0x50; h[8]=(h[8]&0x3f)|0x80;
+  const hex=h.subarray(0,16).toString("hex");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+}
+async function apiFootballGet(pathname){
+  if(!API_FOOTBALL_KEY) throw new Error("API_FOOTBALL_KEY no configurada");
+  const r=await fetch(`${API_FOOTBALL_BASE}${pathname}`,{headers:{"x-apisports-key":API_FOOTBALL_KEY,"Accept":"application/json"}});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok || (Array.isArray(d.errors)&&d.errors.length)) {
+    const msg=Array.isArray(d.errors)?d.errors.join("; "):`HTTP ${r.status}`;
+    throw new Error(`API-Football: ${msg}`);
+  }
+  return d;
+}
+function apiFixtureStatus(f){
+  const s=f?.fixture?.status?.short||"NS";
+  const liveCodes=new Set(["1H","HT","2H","ET","BT","P","LIVE"]);
+  if(liveCodes.has(s)) return "LIVE";
+  if(["FT","AET","PEN"].includes(s)) return "CLOSED";
+  if(["PST","CANC","ABD","AWD","WO"].includes(s)) return "CLOSED";
+  return "OPEN";
+}
+function apiMarketStatus(item){
+  const st=item?.status||{};
+  if(st.stopped||st.blocked||st.finished) return "CLOSED";
+  return "OPEN";
+}
+function cleanMarketName(name){
+  return String(name||"Mercado en vivo").slice(0,100);
+}
+function liveSelectionKey(fixtureId,betId,value){
+  return `api-football:live:${fixtureId}:${betId}:${String(value)}`.slice(0,240);
+}
+async function syncApiFootballLive(){
+  if(!LIVE_SYNC_ENABLED || !API_FOOTBALL_KEY) return {enabled:LIVE_SYNC_ENABLED,configured:false,fixtures:0,odds:0};
+  const started=Date.now();
+  const fixturesData=await apiFootballGet("/fixtures?live=all");
+  const fixtures=Array.isArray(fixturesData.response)?fixturesData.response:[];
+  const liveIds=new Set(fixtures.map(x=>String(x?.fixture?.id)).filter(Boolean));
+  // First update real fixtures so names/score/status are always available.
+  for(const f of fixtures){
+    const fid=String(f.fixture.id);
+    const status=apiFixtureStatus(f);
+    const extId=fid;
+    const leagueName=f.league?.name||`Liga ${f.league?.id||""}`;
+    const home=f.teams?.home?.name||`Local ${f.teams?.home?.id||""}`;
+    const away=f.teams?.away?.name||`Visitante ${f.teams?.away?.id||""}`;
+    const starts=f.fixture?.date||new Date().toISOString();
+    const scoreHome=Number.isFinite(Number(f.goals?.home))?Number(f.goals.home):0;
+    const scoreAway=Number.isFinite(Number(f.goals?.away))?Number(f.goals.away):0;
+    const elapsed=Number.isFinite(Number(f.fixture?.status?.elapsed))?Number(f.fixture.status.elapsed):null;
+    const liveStatus=String(f.fixture?.status?.long||f.fixture?.status?.short||"").slice(0,100);
+    await pool.query(`
+      INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,featured,video,external_source,external_id,live_elapsed,live_status,last_synced_at)
+      VALUES($1,'Fútbol',$2,$3,$4,$5,$6,$7,$8,FALSE,FALSE,'API_FOOTBALL',$9,$10,$11,NOW())
+      ON CONFLICT (external_source,external_id) WHERE external_id IS NOT NULL
+      DO UPDATE SET league=EXCLUDED.league,home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,starts_at=EXCLUDED.starts_at,status=EXCLUDED.status,
+        home_score=EXCLUDED.home_score,away_score=EXCLUDED.away_score,live_elapsed=EXCLUDED.live_elapsed,live_status=EXCLUDED.live_status,last_synced_at=NOW()
+    `,[deterministicUuid(`event:${extId}`),leagueName,home,away,starts,status,scoreHome,scoreAway,extId,elapsed,liveStatus]);
+  }
+  // Pull the in-play odds in one request. API-Football documents this endpoint as the live-odds feed.
+  const oddsData=await apiFootballGet("/odds/live");
+  const oddsRows=Array.isArray(oddsData.response)?oddsData.response:[];
+  let marketCount=0,selectionCount=0;
+  for(const row of oddsRows){
+    const fid=String(row?.fixture?.id||"");
+    if(!fid) continue;
+    const eventQ=await pool.query("SELECT id,status FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=$1 LIMIT 1",[fid]);
+    if(!eventQ.rows[0]) continue;
+    const eventId=eventQ.rows[0].id;
+    const marketStatus=apiMarketStatus(row);
+    const bookmakers=Array.isArray(row.bookmakers)?row.bookmakers:[];
+    // Prefer the first bookmaker returned by the provider. We retain the provider value and never invent odds.
+    const bookmaker=bookmakers[0];
+    const bets=Array.isArray(bookmaker?.bets)?bookmaker.bets:[];
+    for(const bet of bets){
+      const betId=String(bet.id);
+      const marketKey=`api-football:market:${fid}:${betId}`;
+      const marketId=deterministicUuid(marketKey);
+      await pool.query(`
+        INSERT INTO markets(id,event_id,name,market_type,status,external_key)
+        VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT (external_key) WHERE external_key IS NOT NULL
+        DO UPDATE SET name=EXCLUDED.name,event_id=EXCLUDED.event_id,status=EXCLUDED.status
+      `,[marketId,eventId,cleanMarketName(bet.name),`API_LIVE_${betId}`,marketStatus,marketKey]);
+      marketCount++;
+      const values=Array.isArray(bet.values)?bet.values:[];
+      const seen=new Set();
+      for(const v of values){
+        const rawValue=String(v?.value??"").trim();
+        const odd=Number(v?.odd);
+        if(!rawValue||!Number.isFinite(odd)||odd<=1) continue;
+        const selectionKey=liveSelectionKey(fid,betId,rawValue);
+        if(seen.has(selectionKey)) continue;
+        seen.add(selectionKey);
+        const selId=deterministicUuid(selectionKey);
+        const selectionStatus=marketStatus==="OPEN" && v?.suspended!==true ? "OPEN" : "CLOSED";
+        const label=rawValue.slice(0,100);
+        await pool.query(`
+          INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key)
+          VALUES($1,$2,$3,$4,$5,$6,$7)
+          ON CONFLICT (external_key) WHERE external_key IS NOT NULL
+          DO UPDATE SET market_id=EXCLUDED.market_id,label=EXCLUDED.label,code=EXCLUDED.code,odds=EXCLUDED.odds,status=EXCLUDED.status
+        `,[selId,marketId,label,`API:${betId}:${rawValue}`.slice(0,30),odd,selectionStatus,selectionKey]);
+        selectionCount++;
+      }
+      // Remove selections that disappeared from this market's current feed.
+      if(seen.size){
+        await pool.query("UPDATE market_selections SET status='CLOSED' WHERE market_id=$1 AND external_key IS NOT NULL AND NOT (external_key = ANY($2::text[]))",[marketId,[...seen]]);
+      }
+    }
+  }
+  if(liveIds.size){
+    await pool.query("UPDATE sports_events SET status='CLOSED',last_synced_at=NOW() WHERE external_source='API_FOOTBALL' AND external_id IS NOT NULL AND NOT (external_id = ANY($1::text[]))",[...liveIds]);
+  }else{
+    await pool.query("UPDATE sports_events SET status='CLOSED',last_synced_at=NOW() WHERE external_source='API_FOOTBALL' AND external_id IS NOT NULL");
+  }
+  return {enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,markets:marketCount,selections:selectionCount,elapsedMs:Date.now()-started};
+}
+async function startLiveSync(){
+  if(!LIVE_SYNC_ENABLED) return;
+  const run=async()=>{
+    try{
+      const result=await syncApiFootballLive();
+      if(result.configured) console.log("API-Football live sync",result);
+    }catch(e){console.error("API-Football live sync error:",e.message)}
+  };
+  await run();
+  setInterval(run,LIVE_SYNC_INTERVAL_MS);
+}
+
 let dbReady=false;
-app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady}));
+app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS}}));
 app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin/",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin.html",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.use(express.static(path.join(__dirname,".")));
 app.use("/api",(req,res)=>res.status(404).json({error:"Endpoint no encontrado"}));
 app.get("/{*splat}",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
-app.listen(PORT,()=>{console.log("BetLive API escuchando en "+PORT);dbInit().then(async()=>{await ensureBootstrapAdmin();dbReady=true;console.log("Base de datos inicializada correctamente")}).catch(e=>console.error("Error inicializando la base de datos:",e))});
+app.listen(PORT,()=>{console.log("BetLive API escuchando en "+PORT);dbInit().then(async()=>{
+  await ensureBootstrapAdmin();dbReady=true;console.log("Base de datos inicializada correctamente");
+  startLiveSync();
+}).catch(e=>console.error("Error inicializando la base de datos:",e))});

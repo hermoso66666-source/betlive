@@ -11,3 +11,11 @@
 .wallet-info{padding:12px;margin:8px 0;border:1px solid #303038;border-radius:10px;line-height:1.5;font-size:.9rem}.wallet-info p{margin:6px 0}.auth select{width:100%;padding:12px;margin:5px 0;background:#0d0d10;color:#fff;border:1px solid #333;border-radius:8px}.auth input{box-sizing:border-box}
 
 .bet-card{background:#151515;border:1px solid #292929;border-radius:7px;padding:12px;margin:8px 0}.bet-card-top{display:flex;justify-content:space-between;gap:10px}.bet-status{padding:3px 7px;border-radius:10px;border:1px solid #333;font-size:10px}.bet-status.pending{color:#ffd166}.bet-status.won{color:#7ee787}.bet-status.lost{color:#ff7b86}.bet-status.void{color:#aaa}.bet-selections{margin-top:8px;display:grid;gap:6px}.bet-selections>div{padding:7px;background:#101010;border-radius:4px}.bet-selections small{display:block;color:#777;margin-top:3px}.support-modal{max-height:90vh;display:flex;flex-direction:column}.support-messages{height:360px;overflow:auto;background:#0d0d0f;border:1px solid #292929;border-radius:7px;padding:10px}.support-msg{max-width:85%;padding:8px 10px;margin:6px 0;border-radius:7px;background:#191919}.support-msg.mine{margin-left:auto;background:#4a1117}.support-msg b{font-size:10px}.support-msg p{margin:4px 0;white-space:pre-wrap;word-break:break-word}.support-msg small{color:#777;font-size:8px}.support-compose textarea{width:100%;margin-top:8px;background:#1b1b1b;border:1px solid #303030;color:#fff;padding:10px;border-radius:5px;resize:vertical}.support-compose .red{margin:8px 0 0;width:100%}
+
+/* V4 live markets */
+.live-market{margin:10px 0;padding:10px;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:rgba(255,255,255,.02)}
+.live-market>b{display:block;margin-bottom:8px;font-size:13px}
+.live-market-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:7px}
+.live-market-options .odd{min-height:52px;display:flex;flex-direction:column;justify-content:center;gap:3px}
+.live-market-options .odd small{font-size:11px;white-space:normal}
+.scoreline{text-align:center;font-size:12px;opacity:.75;padding:4px 0}

@@ -102,3 +102,13 @@ Redirect URIs:
 - Chat de soporte jugador ↔ admin con actualización periódica.
 - Panel admin organizado por secciones y menú móvil.
 - Datos de depósito/transferencia editables desde Admin → Depósito.
+
+
+## V4 — API-Football en vivo
+
+Agrega en Render:
+- `API_FOOTBALL_KEY` = tu clave privada de API-Football.
+- `LIVE_SYNC_ENABLED=true`
+- `LIVE_SYNC_INTERVAL_MS=60000` (ajústalo según tu plan/cuota de API).
+
+La integración usa `/fixtures?live=all` para partidos/marcadores y `/odds/live` para cuotas en vivo. La API key solo se utiliza en el backend.

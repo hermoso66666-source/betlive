@@ -1,7 +1,11 @@
 let M=[],sport="Todos",filter="all",slip=[],type="single",quick=null,quickMode=false,user=null;
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s),money=c=>"$"+(Number(c)/100).toLocaleString("es-MX",{minimumFractionDigits:2}),toast=t=>{let x=$("#toast");x.textContent=t;x.classList.add("show");setTimeout(()=>x.classList.remove("show"),1800)};
 async function api(url,opt={}){let r=await fetch(url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opt.headers||{})},...opt});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||"Error");return d}
-function normalizeEvents(events){return events.map(e=>{const markets=e.markets||[];const odds=markets.flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})));return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,odds}})}
+function normalizeEvents(events){return events.map(e=>{
+  const markets=(e.markets||[]).map(m=>({...m,selections:(m.selections||[]).map(s=>({...s,odds:Number(s.odds)}))}));
+  const odds=markets.flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})));
+  return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,markets,odds}
+})}
 async function loadEvents(){try{const d=await api("/api/events");M=normalizeEvents(d.events);render()}catch(e){toast(e.message)}}
 async function loadMe(){try{let d=await api("/api/me");user=d.user;$("#balance").textContent=money(user.balance_cents);$("#account").textContent=(user.name||"U")[0].toUpperCase()}catch{user=null;$("#balance").textContent="$0.00"}}
 async function loadTickets(mode="all"){
@@ -16,7 +20,38 @@ async function loadTickets(mode="all"){
 }
 const escapeHtml=v=>String(v??"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 
-function render(){let q=$("#search").value.toLowerCase(),a=M.filter(m=>(sport==="Todos"||m.sport===sport)&&(!q||(`${m.home} ${m.away} ${m.league}`).toLowerCase().includes(q))).filter(m=>filter==="all"||filter==="featured"&&m.featured||filter==="video"&&m.video||filter==="goals"&&(m.score[0]+m.score[1]>0));$("#count").textContent=a.length+" eventos";$("#matches").innerHTML=a.map(m=>`<article class=match><div class=matchtop><span>${m.league}</span><span class=live>${m.status==="LIVE"?"● EN VIVO":"● ABIERTO"}</span><span>${m.video?"▶ VIDEO":""}</span></div><div class=event><span>☆</span><div class=team>${m.home}<small>${m.score[0]}</small></div>${m.odds.map((o,i)=>`<button class="odd ${slip.some(x=>x.id===m.id&&x.i===i)?"sel":""}" data-id="${m.id}" data-i="${i}" ${o.status!=="OPEN"?"disabled":""}><small>${m.odds.length===3?["1","X","2"][i]:o.code||"1/2"}</small><b>${o.odd.toFixed(2)}</b></button>`).join("")}<span class=more>+ mercados</span></div><div class=event style="padding-top:0"><span></span><div class=team>${m.away}<small>${m.score[1]}</small></div></div></article>`).join("")||"<div class=empty>No hay eventos disponibles.</div>";$$('.odd').forEach(b=>b.onclick=()=>pick(b.dataset.id,+b.dataset.i));renderSlip()}
+function render(){
+  let q=$("#search").value.toLowerCase(),a=M.filter(m=>(sport==="Todos"||m.sport===sport)&&(!q||(`${m.home} ${m.away} ${m.league}`).toLowerCase().includes(q))).filter(m=>filter==="all"||filter==="featured"&&m.featured||filter==="video"&&m.video||filter==="goals"&&(m.score[0]+m.score[1]>0));
+  $("#count").textContent=a.length+" eventos";
+  $("#matches").innerHTML=a.map(m=>{
+    const isLive=m.status==="LIVE";
+    const time=isLive?(m.liveStatus?`${m.liveStatus}${m.liveElapsed!=null?` · ${m.liveElapsed}'`:""}`:"● EN VIVO"):(m.status==="OPEN"?"● PRÓXIMO":"● CERRADO");
+    const visibleMarkets=(m.markets||[]).filter(x=>(x.selections||[]).length).slice(0,8);
+    const marketHtml=visibleMarkets.map(mk=>`<div class="live-market"><b>${escapeHtml(mk.name)}</b><div class="live-market-options">${(mk.selections||[]).slice(0,6).map(s=>{
+      const selected=slip.some(x=>x.selectionId===s.id);
+      return `<button class="odd ${selected?"sel":""}" data-id="${m.id}" data-sid="${s.id}" ${s.status!=="OPEN"||m.status==="CLOSED"?"disabled":""}><small>${escapeHtml(s.label)}</small><b>${Number(s.odds).toFixed(2)}</b></button>`;
+    }).join("")}</div></div>`).join("");
+    return `<article class="match">
+      <div class="matchtop"><span>${escapeHtml(m.league)}</span><span class="live">${isLive?"🔴 ":""}${escapeHtml(time)}</span><span>${m.video?"▶ VIDEO":""}</span></div>
+      <div class="event"><span>☆</span><div class="team">${escapeHtml(m.home)}<small>${m.score[0]}</small></div></div>
+      <div class="scoreline">${isLive?`Marcador en vivo · ${m.score[0]} - ${m.score[1]}`:""} </div>
+      <div class="event" style="padding-top:0"><span></span><div class="team">${escapeHtml(m.away)}<small>${m.score[1]}</small></div></div>
+      ${marketHtml||'<div class="empty">Sin mercados disponibles en este momento.</div>'}
+    </article>`;
+  }).join("")||"<div class=empty>No hay eventos disponibles.</div>";
+  $$('.odd').forEach(b=>b.onclick=()=>pickSelection(b.dataset.id,b.dataset.sid));
+  renderSlip()
+}
+function pickSelection(eventId,selectionId){
+  const m=M.find(x=>x.id===eventId), s=m?.markets?.flatMap(x=>x.selections||[]).find(x=>x.id===selectionId);
+  if(!m||!s)return;
+  const market=m.markets.find(x=>(x.selections||[]).some(y=>y.id===selectionId));
+  const x={id:eventId,selectionId,odd:Number(s.odds),home:m.home,away:m.away,league:m.league,label:`${market?.name||"Mercado"}: ${s.label}`,code:s.code};
+  if(quickMode){quick=x;$("#qselection").innerHTML=`<b>${escapeHtml(x.home)} vs ${escapeHtml(x.away)}</b><br>${escapeHtml(x.league)} · ${escapeHtml(x.label)} · ${x.odd.toFixed(2)}`;$("#qbet").disabled=false;return}
+  const p=slip.findIndex(y=>y.id===selectionId);
+  if(p>=0)slip.splice(p,1);else{if(type==="single")slip=[];slip.push(x)}
+  render()
+}
 function pick(id,i){let m=M.find(x=>x.id===id),o=m?.odds[i];if(!o)return;let x={id,i,selectionId:o.id,odd:o.odd,home:m.home,away:m.away,league:m.league,label:o.label,code:o.code};if(quickMode){quick=x;$("#qselection").innerHTML=`<b>${x.home} vs ${x.away}</b><br>${x.league} · ${x.label} · ${x.odd.toFixed(2)}`;$("#qbet").disabled=false;return}let p=slip.findIndex(y=>y.id===id);if(p>=0)slip.splice(p,1);else{if(type==="single")slip=[];slip.push(x)}render()}
 function renderSlip(){let o=slip.reduce((a,x)=>a*x.odd,1),st=Math.round(Number($("#stake").value)*100)||0;$("#slipItems").innerHTML=slip.length?slip.map((x,i)=>`<div class=slip-item><button class=remove data-r=${i}>×</button><b>${x.home} vs ${x.away}</b><small>${x.league} · ${x.label} · ${x.odd.toFixed(2)}</small></div>`).join(""):"<div class=empty>Selecciona un momio para agregarlo.</div>";$$('.remove').forEach(b=>b.onclick=()=>{slip.splice(+b.dataset.r,1);render()});$("#odds").textContent=slip.length?o.toFixed(2):"0.00";$("#potential").textContent=money(st*o);$("#ticketCount").textContent=slip.length;$("#mobileCount").textContent=slip.length;$("#mobilePot").textContent=money(st*o);$("#bet").disabled=!user||!slip.length||st<100||!user.balance_cents||st>Number(user.balance_cents)}
 async function submitTicket(items,stakeCents){if(!user)return openAuth();if(!items.length)return toast("Selecciona un momio");try{const d=await api("/api/tickets",{method:"POST",body:JSON.stringify({stakeCents,selectionIds:items.map(x=>x.selectionId)})});await loadMe();await loadTickets();slip=[];render();toast("Ticket creado ✓") }catch(e){toast(e.message)}}
