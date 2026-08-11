@@ -1,0 +1,11 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BetLive · Admin</title><link rel="stylesheet" href="admin.css"></head><body>
+<header><div class="brand">BET<span>LIVE</span><small>ADMIN</small></div><div id="adminName"></div><button id="logout" class="ghost">Cerrar sesión</button></header>
+<main id="app" class="hidden">
+<section class="cards"><div><small>Usuarios</small><b id="usersTotal">0</b></div><div><small>Activos</small><b id="usersActive">0</b></div><div><small>Tickets</small><b id="ticketsTotal">0</b></div><div><small>Saldo usuarios</small><b id="balanceTotal">$0.00</b></div></section>
+<nav class="tabs"><button class="active" data-view="users">Usuarios</button><button data-view="tickets">Tickets</button></nav>
+<section id="usersView"><div class="toolbar"><input id="userSearch" placeholder="Buscar por nombre, correo o teléfono"><button id="refreshUsers">Actualizar</button></div><div class="tablewrap"><table><thead><tr><th>Usuario</th><th>Contacto</th><th>Saldo</th><th>Estado</th><th>Acciones</th></tr></thead><tbody id="usersBody"></tbody></table></div></section>
+<section id="ticketsView" class="hidden"><div class="toolbar"><button id="refreshTickets">Actualizar</button></div><div class="tablewrap"><table><thead><tr><th>Usuario</th><th>Importe</th><th>Cuota</th><th>Potencial</th><th>Estado</th><th>Fecha</th></tr></thead><tbody id="ticketsBody"></tbody></table></div></section>
+</main>
+<div id="login" class="login"><form id="loginForm"><div class="brand big">BET<span>LIVE</span><small>ADMIN</small></div><h1>Panel administrativo</h1><input id="email" type="email" placeholder="Correo de administrador" required><input id="password" type="password" placeholder="Contraseña" required><button class="primary">Entrar</button><p id="loginError"></p></form></div>
+<div id="modal" class="modal hidden"><div class="modalbox"><button id="closeModal" class="close">×</button><h2 id="modalTitle">Usuario</h2><div id="modalContent"></div></div></div>
+<div id="toast"></div><script src="admin.js"></script></body></html>

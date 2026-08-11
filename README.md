@@ -40,3 +40,14 @@ Opcionales para la siguiente fase OAuth:
 Google/Facebook y SMS no se deben simular como "login real". Requieren credenciales de OAuth/proveedor y configuración de producción. Esta base deja preparada la arquitectura; la siguiente integración puede añadir OAuth/OIDC y verificación SMS.
 
 Los eventos actuales siguen siendo datos virtuales de demostración. No hay pagos, depósitos ni retiros.
+
+
+## Panel administrativo
+
+El panel está disponible en `/admin.html`. Para crear el primer administrador, configura en Render estas variables de entorno **antes de reiniciar/desplegar**:
+
+- `ADMIN_EMAIL`: correo del administrador inicial.
+- `ADMIN_PASSWORD`: contraseña inicial (8–128 caracteres).
+- `ADMIN_NAME`: nombre que aparecerá en el panel (opcional).
+
+El administrador puede consultar estadísticas, buscar usuarios, bloquear/activar cuentas, agregar o retirar saldo con motivo y revisar el historial de movimientos y tickets. Los cambios de saldo se registran en `balance_transactions`; no se modifica el saldo sin dejar auditoría.

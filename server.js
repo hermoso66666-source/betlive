@@ -37,8 +37,22 @@ async function dbInit(){
    provider VARCHAR(20) NOT NULL DEFAULT 'local',
    provider_subject VARCHAR(255),
    balance_cents BIGINT NOT NULL DEFAULT 1000000,
+   role VARCHAR(20) NOT NULL DEFAULT 'user',
+   active BOOLEAN NOT NULL DEFAULT TRUE,
    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
  );
+ ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';
+ ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+ CREATE TABLE IF NOT EXISTS balance_transactions(
+   id UUID PRIMARY KEY,
+   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+   admin_id UUID REFERENCES users(id) ON DELETE SET NULL,
+   amount_cents BIGINT NOT NULL CHECK(amount_cents<>0),
+   balance_after_cents BIGINT NOT NULL CHECK(balance_after_cents>=0),
+   reason VARCHAR(255) NOT NULL,
+   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ );
+ CREATE INDEX IF NOT EXISTS idx_balance_tx_user_created ON balance_transactions(user_id,created_at DESC);
  CREATE TABLE IF NOT EXISTS tickets(
    id UUID PRIMARY KEY,
    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -61,8 +75,8 @@ async function auth(req,res,next){
    const token=req.cookies.bl_session;
    if(!token) return res.status(401).json({error:"No autenticado"});
    const p=jwt.verify(token,JWT_SECRET);
-   const {rows}=await pool.query("SELECT id,name,email,phone,balance_cents FROM users WHERE id=$1",[p.sub]);
-   if(!rows[0]) return res.status(401).json({error:"Sesión inválida"});
+   const {rows}=await pool.query("SELECT id,name,email,phone,balance_cents,role,active FROM users WHERE id=$1",[p.sub]);
+   if(!rows[0]||!rows[0].active) return res.status(401).json({error:"Sesión inválida o cuenta bloqueada"});
    req.user=rows[0];next();
  }catch{return res.status(401).json({error:"Sesión inválida"})}
 }
@@ -85,8 +99,8 @@ app.post("/api/auth/login",authLimiter,async(req,res)=>{
   const identifier=(req.body.identifier||"").trim().toLowerCase(), password=req.body.password;
   if(identifier.length<3||!validatePassword(password)) return res.status(400).json({error:"Datos inválidos"});
   const {rows}=await pool.query("SELECT * FROM users WHERE lower(coalesce(email,''))=$1 OR phone=$2 LIMIT 1",[identifier,identifier]);
-  if(!rows[0]||!rows[0].password_hash||!(await bcrypt.compare(password,rows[0].password_hash))) return res.status(401).json({error:"Credenciales incorrectas"});
-  setAuth(res,rows[0]);res.json({user:{id:rows[0].id,name:rows[0].name,email:rows[0].email,phone:rows[0].phone,balance_cents:rows[0].balance_cents}});
+  if(!rows[0]||!rows[0].active||!rows[0].password_hash||!(await bcrypt.compare(password,rows[0].password_hash))) return res.status(401).json({error:rows[0]&&!rows[0].active?"Cuenta bloqueada":"Credenciales incorrectas"});
+  setAuth(res,rows[0]);res.json({user:{id:rows[0].id,name:rows[0].name,email:rows[0].email,phone:rows[0].phone,balance_cents:rows[0].balance_cents,role:rows[0].role}});
  }catch(e){console.error(e);res.status(500).json({error:"Error del servidor"})}
 });
 app.post("/api/auth/logout",auth,(req,res)=>{res.clearCookie("bl_session",{httpOnly:true,secure:process.env.NODE_ENV==="production",sameSite:"lax",path:"/"});res.json({ok:true})});
@@ -115,6 +129,69 @@ app.post("/api/tickets",auth,ticketLimiter,async(req,res)=>{
  finally{client.release()}
 });
 
+function requireAdmin(req,res,next){
+ if(!req.user||req.user.role!=="admin") return res.status(403).json({error:"Acceso de administrador requerido"});
+ next();
+}
+
+app.get("/api/admin/me",auth,requireAdmin,(req,res)=>res.json({admin:req.user}));
+app.get("/api/admin/stats",auth,requireAdmin,async(req,res)=>{
+ try{
+  const [u,t,b]=await Promise.all([
+   pool.query("SELECT COUNT(*)::int total, COUNT(*) FILTER(WHERE active)::int active, COUNT(*) FILTER(WHERE role='admin')::int admins FROM users"),
+   pool.query("SELECT COUNT(*)::int total, COUNT(*) FILTER(WHERE status='PENDING')::int pending, COALESCE(SUM(stake_cents),0)::bigint staked FROM tickets"),
+   pool.query("SELECT COALESCE(SUM(balance_cents),0)::bigint balance FROM users WHERE role='user'")
+  ]);
+  res.json({users:u.rows[0],tickets:t.rows[0],balances:b.rows[0]});
+ }catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar las estadísticas"})}
+});
+app.get("/api/admin/users",auth,requireAdmin,async(req,res)=>{
+ try{
+  const q=(req.query.q||"").trim().toLowerCase();
+  const {rows}=await pool.query(`SELECT id,name,email,phone,balance_cents,role,active,created_at FROM users WHERE ($1='' OR lower(name) LIKE '%'||$1||'%' OR lower(coalesce(email,'')) LIKE '%'||$1||'%' OR coalesce(phone,'') LIKE '%'||$1||'%') ORDER BY created_at DESC LIMIT 200`,[q]);
+  res.json({users:rows});
+ }catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los usuarios"})}
+});
+app.patch("/api/admin/users/:id/status",auth,requireAdmin,async(req,res)=>{
+ try{
+  const active=Boolean(req.body.active);
+  if(req.params.id===req.user.id&&!active) return res.status(400).json({error:"No puedes bloquear tu propia cuenta"});
+  const {rows}=await pool.query("UPDATE users SET active=$1 WHERE id=$2 RETURNING id,name,email,phone,balance_cents,role,active,created_at",[active,req.params.id]);
+  if(!rows[0]) return res.status(404).json({error:"Usuario no encontrado"});
+  res.json({user:rows[0]});
+ }catch(e){console.error(e);res.status(500).json({error:"No se pudo cambiar el estado"})}
+});
+app.post("/api/admin/users/:id/balance",auth,requireAdmin,async(req,res)=>{
+ const amount=Math.trunc(Number(req.body.amountCents));
+ const reason=typeof req.body.reason==='string'?req.body.reason.trim().slice(0,255):'';
+ if(!Number.isSafeInteger(amount)||amount===0||!reason) return res.status(400).json({error:"Monto o motivo inválido"});
+ const client=await pool.connect();
+ try{
+  await client.query("BEGIN");
+  const u=await client.query("SELECT id,name,balance_cents,role,active FROM users WHERE id=$1 FOR UPDATE",[req.params.id]);
+  if(!u.rows[0]){await client.query("ROLLBACK");return res.status(404).json({error:"Usuario no encontrado"})}
+  const current=BigInt(u.rows[0].balance_cents), next=current+BigInt(amount);
+  if(next<0n){await client.query("ROLLBACK");return res.status(400).json({error:"El saldo no puede quedar negativo"})}
+  await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next.toString(),req.params.id]);
+  await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,amount_cents,balance_after_cents,reason) VALUES($1,$2,$3,$4,$5,$6)",[crypto.randomUUID(),req.params.id,req.user.id,amount,next.toString(),reason]);
+  await client.query("COMMIT");
+  res.json({ok:true,balance_cents:next.toString()});
+ }catch(e){await client.query("ROLLBACK");console.error(e);res.status(500).json({error:"No se pudo actualizar el saldo"})}
+ finally{client.release()}
+});
+app.get("/api/admin/users/:id/transactions",auth,requireAdmin,async(req,res)=>{
+ try{
+  const {rows}=await pool.query(`SELECT bt.id,bt.amount_cents,bt.balance_after_cents,bt.reason,bt.created_at,COALESCE(a.name,'Sistema') admin_name FROM balance_transactions bt LEFT JOIN users a ON a.id=bt.admin_id WHERE bt.user_id=$1 ORDER BY bt.created_at DESC LIMIT 100`,[req.params.id]);
+  res.json({transactions:rows});
+ }catch(e){console.error(e);res.status(500).json({error:"No se pudo cargar el historial"})}
+});
+app.get("/api/admin/tickets",auth,requireAdmin,async(req,res)=>{
+ try{
+  const {rows}=await pool.query(`SELECT t.id,t.stake_cents,t.total_odds,t.potential_cents,t.status,t.selections,t.created_at,u.name user_name,u.email user_email FROM tickets t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 200`);
+  res.json({tickets:rows});
+ }catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los tickets"})}
+});
+
 app.use(express.static(path.join(__dirname,".")));
 app.get("/{*splat}",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
 let dbReady=false;
@@ -126,7 +203,8 @@ app.get("/api/health",(req,res)=>{
 app.listen(PORT,()=>{
   console.log("BetLive API escuchando en "+PORT);
   dbInit()
-    .then(()=>{
+    .then(async()=>{
+      await ensureBootstrapAdmin();
       dbReady=true;
       console.log("Base de datos inicializada correctamente");
     })
