@@ -145,7 +145,6 @@ function baseUrl(req){
 }
 function oauthConfigured(provider){
   if(provider==="google") return !!(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET);
-  if(provider==="facebook") return !!(process.env.FACEBOOK_APP_ID&&process.env.FACEBOOK_APP_SECRET);
   return false;
 }
 function oauthRedirect(req,provider){
@@ -245,48 +244,6 @@ app.get("/api/auth/google/callback",async(req,res)=>{
     if(!linkUserId)setAuth(res,u);
     res.redirect("/?oauth=success");
   }catch(e){console.error("Google OAuth:",e);oauthError(res,e.message||"No se pudo iniciar sesión con Google")}
-});
-
-app.get("/api/auth/facebook",authLimiter,(req,res)=>{
-  if(!oauthConfigured("facebook"))return res.status(503).send("Facebook OAuth no está configurado.");
-  const action=req.query.action==="link"?"link":"login",state=setOAuthState(res,"facebook",action);
-  const version=process.env.FACEBOOK_GRAPH_VERSION||"v25.0";
-  const u=new URL(`https://www.facebook.com/${version}/dialog/oauth`);
-  u.searchParams.set("client_id",process.env.FACEBOOK_APP_ID);
-  u.searchParams.set("redirect_uri",oauthRedirect(req,"facebook"));
-  u.searchParams.set("response_type","code");
-  u.searchParams.set("scope","public_profile,email");
-  u.searchParams.set("state",state);
-  res.redirect(u.toString());
-});
-app.get("/api/auth/facebook/callback",async(req,res)=>{
-  try{
-    const action=(req.cookies.bl_oauth_state||"").split(".")[1]||"login";
-    if(!takeOAuthState(req,res,"facebook",action))return oauthError(res,"Estado OAuth inválido o expirado");
-    if(req.query.error)return oauthError(res,"Facebook canceló el inicio de sesión");
-    if(!req.query.code)return oauthError(res,"Facebook no devolvió el código");
-    const version=process.env.FACEBOOK_GRAPH_VERSION||"v25.0";
-    const tokenUrl=new URL(`https://graph.facebook.com/${version}/oauth/access_token`);
-    tokenUrl.searchParams.set("client_id",process.env.FACEBOOK_APP_ID);
-    tokenUrl.searchParams.set("client_secret",process.env.FACEBOOK_APP_SECRET);
-    tokenUrl.searchParams.set("redirect_uri",oauthRedirect(req,"facebook"));
-    tokenUrl.searchParams.set("code",req.query.code);
-    const tr=await fetch(tokenUrl);
-    const tokens=await tr.json();
-    if(!tr.ok||!tokens.access_token)throw new Error("No se pudo obtener el token de Facebook");
-    const meUrl=new URL(`https://graph.facebook.com/${version}/me`);
-    meUrl.searchParams.set("fields","id,name,email,picture.type(large)");
-    meUrl.searchParams.set("access_token",tokens.access_token);
-    const mr=await fetch(meUrl);
-    const info=await mr.json();
-    if(!mr.ok||!info.id)throw new Error("Facebook no devolvió un perfil válido");
-    let linkUserId=null;
-    if(action==="link"){const me=await currentUserFromCookie(req);if(!me)return oauthError(res,"Debes iniciar sesión para vincular Facebook");linkUserId=me.id;}
-    const avatar=info.picture?.data?.url||null;
-    const u=await findOrCreateOAuthUser({provider:"facebook",subject:info.id,name:info.name,email:info.email,avatar,emailVerified:false,linkUserId});
-    if(!linkUserId)setAuth(res,u);
-    res.redirect("/?oauth=success");
-  }catch(e){console.error("Facebook OAuth:",e);oauthError(res,e.message||"No se pudo iniciar sesión con Facebook")}
 });
 
 // Profile / wallet
