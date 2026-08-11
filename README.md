@@ -109,7 +109,8 @@ Redirect URIs:
 Agrega en Render:
 - `API_FOOTBALL_KEY` = tu clave privada de API-Football.
 - `LIVE_SYNC_ENABLED=true`
-- `LIVE_SYNC_INTERVAL_MS=60000` (ajústalo según tu plan/cuota de API).
+- `LIVE_SYNC_INTERVAL_MS=7200000` (2 horas por defecto para no agotar el plan Free; usa un plan superior para sincronización de cuotas en vivo más frecuente).
+- `UPCOMING_CACHE_MS=10800000` (3 horas por defecto; evita que cada visita a “Próximos” vuelva a consumir solicitudes de API).
 
 La integración usa `/fixtures?live=all` para partidos/marcadores y `/odds/live` para cuotas en vivo. La API key solo se utiliza en el backend.
 
