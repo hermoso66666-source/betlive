@@ -3,3 +3,17 @@
 .profile-admin{display:grid;gap:12px}.profile-admin>div{display:flex;justify-content:space-between;gap:12px;align-items:center}.profile-admin strong{font-size:1.25rem}.profile-admin small{display:block;opacity:.7}.history{max-height:260px;overflow:auto;display:grid;gap:8px}.history>div{padding:10px;border:1px solid rgba(255,255,255,.08);border-radius:10px}
 
 .payout{margin-top:6px;padding:8px;border:1px solid #303038;border-radius:8px;font-size:.82rem;line-height:1.45}.panel label{display:grid;gap:6px}.panel textarea{width:100%;padding:10px;background:#0d0d10;color:#fff;border:1px solid #333;border-radius:8px}.panel select,.panel input{padding:10px;background:#0d0d10;color:#fff;border:1px solid #333;border-radius:8px}
+
+/* Panel móvil: las tablas se convierten en tarjetas para que las acciones nunca queden fuera de pantalla. */
+.actions-cell{min-width:220px}.wallet-actions{display:flex;flex-wrap:wrap;gap:6px}.wallet-actions .action{font-weight:700}.wallet-actions .primary{background:#ef3340!important}
+@media(max-width:700px){
+  .panel{padding:12px}.toolbar{flex-wrap:wrap}.toolbar input{min-width:100%}.tablewrap{overflow:visible}
+  table{min-width:0;width:100%;display:block}table thead{display:none}table tbody,table tr{display:block;width:100%}
+  table tr{background:#0e0e12;border:1px solid #292930;border-radius:14px;padding:10px;margin-bottom:12px}
+  table td{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;width:100%;padding:10px 4px;border-bottom:1px solid #24242a;min-width:0;text-align:right;overflow-wrap:anywhere}
+  table td:last-child{border-bottom:0}.actions-cell{display:flex!important;flex-wrap:wrap;justify-content:flex-start!important;min-width:0;text-align:left!important;padding-top:12px}
+  table td::before{content:attr(data-label);font-weight:700;color:#999;text-align:left;flex:0 0 auto;margin-right:auto}
+  table td.actions-cell::before{width:100%;flex-basis:100%;margin-bottom:5px}
+  table td small{max-width:70%}.payout{max-width:100%;text-align:left}.wallet-actions .action{flex:1 1 140px;min-height:44px}
+  .profile-admin .formgrid{grid-template-columns:1fr}.modalbox{padding:20px 14px}.modalbox h2{padding-right:28px}
+}
