@@ -25,7 +25,12 @@ const PORT=process.env.PORT||10000;
 const API_FOOTBALL_KEY=process.env.API_FOOTBALL_KEY||"";
 const API_FOOTBALL_BASE=(process.env.API_FOOTBALL_BASE_URL||"https://v3.football.api-sports.io").replace(/\/$/,"");
 const LIVE_SYNC_ENABLED=String(process.env.LIVE_SYNC_ENABLED??"true").toLowerCase()!=="false";
-const LIVE_SYNC_INTERVAL_MS=Math.max(600000,Number(process.env.LIVE_SYNC_INTERVAL_MS||7200000));
+const LIVE_SYNC_INTERVAL_MS=Math.max(10*60*1000,Number(process.env.LIVE_SYNC_INTERVAL_MS||45*60*1000));
+const API_MIN_REQUEST_GAP_MS=Math.max(1000,Number(process.env.API_MIN_REQUEST_GAP_MS||7000));
+const API_LOW_REMAINING_THRESHOLD=Math.max(1,Number(process.env.API_LOW_REMAINING_THRESHOLD||5));
+const UPCOMING_ODDS_MAX_PAGES=Math.max(1,Math.min(3,Number(process.env.UPCOMING_ODDS_MAX_PAGES||1)));
+const API_PREFERRED_BOOKMAKER=String(process.env.API_PREFERRED_BOOKMAKER||"").trim().toLowerCase();
+let apiFootballQuota={remaining:null,limit:null,lastRequestAt:0,lastResponseAt:null,pausedUntil:0};
 const authLimiter=rateLimit({windowMs:15*60*1000,max:40,standardHeaders:true,legacyHeaders:false});
 const ticketLimiter=rateLimit({windowMs:60*1000,max:20,standardHeaders:true,legacyHeaders:false});
 
@@ -419,23 +424,39 @@ async function syncUpcomingOdds(days=3){
   const fixtures=Array.isArray(fixturesData.response)?fixturesData.response:[];
   await upsertUpcomingFixtures(fixtures);
   const dateSet=[...new Set(fixtures.filter(f=>apiFixtureStatus(f)==='OPEN'&&f?.fixture?.date).map(f=>String(f.fixture.date).slice(0,10)))];
-  let oddsRows=0,markets=0,selections=0;
+  let oddsRows=0,markets=0,selections=0,pagesFetched=0,truncatedDates=[];
   for(const date of dateSet){
-    let rows=[];
-    for(let page=1;page<=3;page++){
+    const rows=[];
+    for(let page=1;page<=UPCOMING_ODDS_MAX_PAGES;page++){
       const oddsData=await apiFootballGet(`/odds?date=${date}&timezone=America/Mexico_City&page=${page}`);
       const pageRows=Array.isArray(oddsData.response)?oddsData.response:[];
-      rows.push(...pageRows);
-      if(!oddsData?.paging?.total || page>=Number(oddsData.paging.total)) break;
+      rows.push(...pageRows); pagesFetched++;
+      const totalPages=Number(oddsData?.paging?.total||1);
+      if(page>=totalPages) break;
+      if(page>=UPCOMING_ODDS_MAX_PAGES) truncatedDates.push(date);
     }
     oddsRows+=rows.length;
     for(const row of rows){
       const fid=String(row?.fixture?.id||""); if(!fid) continue;
       const eventQ=await pool.query("SELECT id FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=$1 LIMIT 1",[fid]);
       if(!eventQ.rows[0]) continue;
-      const bookmaker=Array.isArray(row.bookmakers)?row.bookmakers[0]:null;
-      const bets=Array.isArray(bookmaker?.bets)?bookmaker.bets:[];
-      for(const bet of bets){
+      const bookmakers=Array.isArray(row.bookmakers)?row.bookmakers:[];
+      const betsById=new Map();
+      for(const bookmaker of bookmakers){
+        const bookmakerName=String(bookmaker?.name||"").toLowerCase();
+        const bets=Array.isArray(bookmaker?.bets)?bookmaker.bets:[];
+        for(const bet of bets){
+          const betId=String(bet?.id||""); if(!betId) continue;
+          const values=Array.isArray(bet.values)?bet.values:[];
+          const hasValid=values.some(v=>String(v?.value??"").trim()&&Number.isFinite(Number(v?.odd))&&Number(v.odd)>1);
+          if(!betsById.has(betId)||hasValid){
+            if(!betsById.has(betId)||!Array.isArray(betsById.get(betId).values)||!betsById.get(betId).values.some(v=>Number(v?.odd)>1)){
+              betsById.set(betId,{...bet,bookmaker:bookmakerName});
+            }
+          }
+        }
+      }
+      for(const bet of betsById.values()){
         const betId=String(bet?.id||""); if(!betId) continue;
         const marketKey=`api-football:prematch:${fid}:${betId}`;
         const marketId=deterministicUuid(marketKey);
@@ -454,7 +475,7 @@ async function syncUpcomingOdds(days=3){
       }
     }
   }
-  return {fixtures:fixtures.length,odds:oddsRows,markets,selections,dates:dateSet};
+  return {fixtures:fixtures.length,odds:oddsRows,markets,selections,dates:dateSet,pagesFetched,truncatedDates};
 }
 async function queryUpcomingEvents(){
   const {rows}=await pool.query(`
@@ -671,8 +692,19 @@ function deterministicUuid(value){
 }
 async function apiFootballGet(pathname){
   if(!API_FOOTBALL_KEY) throw new Error("API_FOOTBALL_KEY no configurada");
+  if(Date.now()<apiFootballQuota.pausedUntil) throw new Error("API-Football pausada temporalmente por límite de solicitudes");
+  const wait=Math.max(0,API_MIN_REQUEST_GAP_MS-(Date.now()-apiFootballQuota.lastRequestAt));
+  if(wait) await new Promise(resolve=>setTimeout(resolve,wait));
+  apiFootballQuota.lastRequestAt=Date.now();
   const r=await fetch(`${API_FOOTBALL_BASE}${pathname}`,{headers:{"x-apisports-key":API_FOOTBALL_KEY,"Accept":"application/json"}});
   const d=await r.json().catch(()=>({}));
+  const remainingRaw=r.headers.get("x-ratelimit-requests-remaining")||r.headers.get("X-RateLimit-Remaining");
+  const limitRaw=r.headers.get("x-ratelimit-requests-limit")||r.headers.get("X-RateLimit-Limit");
+  const remaining=Number(remainingRaw),limit=Number(limitRaw);
+  if(Number.isFinite(remaining)) apiFootballQuota.remaining=remaining;
+  if(Number.isFinite(limit)) apiFootballQuota.limit=limit;
+  apiFootballQuota.lastResponseAt=new Date().toISOString();
+  if(Number.isFinite(remaining)&&remaining<=API_LOW_REMAINING_THRESHOLD) apiFootballQuota.pausedUntil=Date.now()+60*60*1000;
   if(!r.ok || (Array.isArray(d.errors)&&d.errors.length)) {
     const msg=Array.isArray(d.errors)?d.errors.join("; "):`HTTP ${r.status}`;
     throw new Error(`API-Football: ${msg}`);
@@ -727,25 +759,46 @@ async function syncApiFootballLive(){
         home_score=EXCLUDED.home_score,away_score=EXCLUDED.away_score,live_elapsed=EXCLUDED.live_elapsed,live_status=EXCLUDED.live_status,last_synced_at=NOW()
     `,[deterministicUuid(`event:${extId}`),leagueName,home,away,starts,status,scoreHome,scoreAway,extId,elapsed,liveStatus]);
   }
-  // Pull the in-play odds in one request. API-Football documents this endpoint as the live-odds feed.
+  // One global live-odds request is deliberately used on the Free plan: it costs one API call
+  // instead of one call per fixture. We still process only the live fixtures discovered above.
   const oddsData=await apiFootballGet("/odds/live");
   const oddsRows=Array.isArray(oddsData.response)?oddsData.response:[];
-  let marketCount=0,selectionCount=0;
+  let marketCount=0,selectionCount=0,matchedOddsRows=0;
+  const seenMarketKeys=new Set();
   for(const row of oddsRows){
     const fid=String(row?.fixture?.id||"");
-    if(!fid) continue;
+    if(!fid||!liveIds.has(fid)) continue;
     const eventQ=await pool.query("SELECT id,status FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=$1 LIMIT 1",[fid]);
     if(!eventQ.rows[0]) continue;
+    matchedOddsRows++;
     const eventId=eventQ.rows[0].id;
     const marketStatus=apiMarketStatus(row);
     const bookmakers=Array.isArray(row.bookmakers)?row.bookmakers:[];
-    // Prefer the first bookmaker returned by the provider. We retain the provider value and never invent odds.
-    const bookmaker=bookmakers[0];
-    const bets=Array.isArray(bookmaker?.bets)?bookmaker.bets:[];
-    for(const bet of bets){
-      const betId=String(bet.id);
+    // Do not assume bookmakers[0] has markets. For each market/bet, use the first bookmaker
+    // that actually supplies valid odds, optionally preferring API_PREFERRED_BOOKMAKER.
+    const orderedBookmakers=[...bookmakers].sort((a,b)=>{
+      const an=String(a?.name||"").toLowerCase(),bn=String(b?.name||"").toLowerCase();
+      return (API_PREFERRED_BOOKMAKER&&an.includes(API_PREFERRED_BOOKMAKER)?-1:0)-
+             (API_PREFERRED_BOOKMAKER&&bn.includes(API_PREFERRED_BOOKMAKER)?-1:0);
+    });
+    const betsById=new Map();
+    for(const bookmaker of orderedBookmakers){
+      for(const bet of (Array.isArray(bookmaker?.bets)?bookmaker.bets:[])){
+        const betId=String(bet?.id||""); if(!betId) continue;
+        const values=Array.isArray(bet.values)?bet.values:[];
+        const hasValid=values.some(v=>String(v?.value??"").trim()&&Number.isFinite(Number(v?.odd))&&Number(v.odd)>1);
+        if(!betsById.has(betId)||hasValid){
+          const current=betsById.get(betId);
+          const currentValid=current?.values?.some(v=>Number(v?.odd)>1);
+          if(!current||(!currentValid&&hasValid)) betsById.set(betId,bet);
+        }
+      }
+    }
+    for(const bet of betsById.values()){
+      const betId=String(bet.id||""); if(!betId) continue;
       const marketKey=`api-football:market:${fid}:${betId}`;
       const marketId=deterministicUuid(marketKey);
+      seenMarketKeys.add(marketKey);
       await pool.query(`
         INSERT INTO markets(id,event_id,name,market_type,status,external_key)
         VALUES($1,$2,$3,$4,$5,$6)
@@ -773,18 +826,28 @@ async function syncApiFootballLive(){
         `,[selId,marketId,label,`API:${betId}:${rawValue}`.slice(0,30),odd,selectionStatus,selectionKey]);
         selectionCount++;
       }
-      // Remove selections that disappeared from this market's current feed.
       if(seen.size){
         await pool.query("UPDATE market_selections SET status='CLOSED' WHERE market_id=$1 AND external_key IS NOT NULL AND NOT (external_key = ANY($2::text[]))",[marketId,[...seen]]);
       }
     }
+  }
+  // A successful odds response is authoritative for the live feed. Markets absent from it
+  // are closed, but only for fixtures that were actually returned as live.
+  if(liveIds.size && oddsRows.length){
+    const liveIdArray=[...liveIds];
+    await pool.query(`
+      UPDATE markets SET status='CLOSED'
+      WHERE event_id IN (SELECT id FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=ANY($1::text[]))
+        AND external_key LIKE 'api-football:market:%'
+        AND NOT (external_key = ANY($2::text[]))
+    `,[liveIdArray,[...seenMarketKeys]]);
   }
   if(liveIds.size){
     await pool.query("UPDATE sports_events SET status='CLOSED',last_synced_at=NOW() WHERE external_source='API_FOOTBALL' AND external_id IS NOT NULL AND NOT (external_id = ANY($1::text[]))",[...liveIds]);
   }else{
     await pool.query("UPDATE sports_events SET status='CLOSED',last_synced_at=NOW() WHERE external_source='API_FOOTBALL' AND external_id IS NOT NULL");
   }
-  const result={enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,markets:marketCount,selections:selectionCount,elapsedMs:Date.now()-started};
+  const result={enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,matchedOddsRows,markets:marketCount,selections:selectionCount,quota:apiFootballQuota,elapsedMs:Date.now()-started};
   liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:result.fixtures,odds:result.odds,markets:result.markets,selections:result.selections,error:null,configured:true};
   return result;
 }
@@ -803,7 +866,7 @@ async function startLiveSync(){
 
 let dbReady=false;
 app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,state:liveSyncState}}));
-app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,...liveSyncState}));
+app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,apiQuota:apiFootballQuota,...liveSyncState}));
 app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin/",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin.html",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));

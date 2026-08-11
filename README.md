@@ -1,4 +1,4 @@
-BetLive V3.6 — corrección de menús móviles y caché de frontend
+BetLive V4.5 — parche de sincronización API-Football y control de cuota
 
 # BetLive — núcleo V3 + panel administrativo
 
@@ -104,20 +104,34 @@ Redirect URIs:
 - Datos de depósito/transferencia editables desde Admin → Depósito.
 
 
-## V4 — API-Football en vivo
+## V4.5 — API-Football en vivo y pre-match
 
-Agrega en Render:
-- `API_FOOTBALL_KEY` = tu clave privada de API-Football.
+Variables recomendadas en Render:
+- `API_FOOTBALL_KEY` = clave privada de API-Football.
 - `LIVE_SYNC_ENABLED=true`
-- `LIVE_SYNC_INTERVAL_MS=7200000` (2 horas por defecto para no agotar el plan Free; usa un plan superior para sincronización de cuotas en vivo más frecuente).
-- `UPCOMING_CACHE_MS=10800000` (3 horas por defecto; evita que cada visita a “Próximos” vuelva a consumir solicitudes de API).
+- `LIVE_SYNC_INTERVAL_MS=2700000` (45 minutos por defecto; el backend nunca baja de 10 minutos).
+- `UPCOMING_CACHE_MS=10800000` (3 horas por defecto).
+- `UPCOMING_ODDS_MAX_PAGES=1` (1 página por fecha para proteger el límite Free).
+- `API_MIN_REQUEST_GAP_MS=7000` (separación mínima entre llamadas del backend).
+- `API_LOW_REMAINING_THRESHOLD=5` (si el proveedor reporta 5 o menos solicitudes restantes, se pausa temporalmente la sincronización).
+- `API_PREFERRED_BOOKMAKER` (opcional; texto parcial del nombre del bookmaker que prefieres).
 
-La integración usa `/fixtures?live=all` para partidos/marcadores y `/odds/live` para cuotas en vivo. La API key solo se utiliza en el backend.
+### Qué se corrigió
+- Se conserva `API_FOOTBALL_KEY` únicamente en backend.
+- Live usa una sola consulta global de `/odds/live` por ciclo para no multiplicar llamadas por fixture.
+- Ya no se usa ciegamente `bookmakers[0]`: para cada mercado se busca un bookmaker que realmente entregue valores/cuotas válidas.
+- Las cuotas que desaparecen se cierran; no se inventan momios.
+- Los mercados live ausentes de una respuesta válida se cierran para los fixtures que siguen live.
+- Se leen los headers de cuota (`x-ratelimit-requests-remaining` / `X-RateLimit-Remaining`) y se expone el estado sin mostrar la API key.
+- Se añade una separación mínima entre solicitudes para respetar el límite de 10 solicitudes/minuto.
+- Próximos partidos limita las páginas de `/odds?date=...` a una por fecha por defecto, evitando el patrón anterior de hasta 3 páginas por cada día.
+- Si el proveedor entrega menos cuotas por falta de página, el diagnóstico de sincronización indica las fechas truncadas.
+- El endpoint `/api/live/status` muestra el estado de la sincronización y la cuota reportada por API-Football.
+- El frontend continúa leyendo PostgreSQL y el backend sigue siendo la autoridad final de las cuotas al crear tickets.
 
+### Límite Free
+No se recomienda configurar la sincronización live a 5 segundos. API-Football puede actualizar el feed con mucha mayor frecuencia, pero una cuenta Free no tiene capacidad para consultar continuamente a esa frecuencia. El valor de 45 minutos prioriza conservar cuota; para apuestas live reales con actualización frecuente se necesita un plan/API budget adecuado.
 
-## V4.1 Live
-- API_FOOTBALL_KEY is read only on the server.
-- Default live sync interval: 45 minutes (2,700,000 ms) to stay within the Free plan during testing.
-- The player live view only displays API_FOOTBALL events with status LIVE; demo events are not shown there.
-- Diagnostic endpoint: /api/live/status (does not expose the API key).
-- For genuine live betting production, use a higher API plan and a much shorter sync interval appropriate to the provider limits.
+## Seguridad y operación
+
+Antes de operar con dinero real hay que revisar los requisitos legales y regulatorios aplicables, además de implementar verificación de edad/identidad, controles antifraude, juego responsable y un proveedor de pagos autorizado.
