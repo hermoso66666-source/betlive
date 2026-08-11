@@ -82,6 +82,10 @@ $$('[data-oauth]').forEach(b=>b.onclick=()=>{ window.location.href="/api/auth/go
 $$('[data-link-oauth]').forEach(b=>b.onclick=()=>{ const provider=b.dataset.linkOauth; if(provider==="google") window.location.href="/api/auth/google?action=link"; });
 setInterval(()=>loadEvents(),15000);
 (async()=>{await loadMe();await loadEvents(true);renderSlip()})();
+setInterval(async()=>{
+  if(document.hidden || !liveOnly || document.querySelector("#events")?.classList.contains("hidden")) return;
+  try{const d=await api("/api/events?live=true");M=normalizeEvents(d.events);render()}catch{}
+},60000);
 
 let supportTimer=null;
 function supportBubble(m){const mine=m.sender_role==='USER';return `<div class="support-msg ${mine?'mine':'admin'}"><b>${mine?'Tú':'Soporte BetLive'}</b><p>${escapeHtml(m.message)}</p><small>${new Date(m.created_at).toLocaleString('es-MX')}</small></div>`}

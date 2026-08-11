@@ -117,6 +117,10 @@ La integración usa `/fixtures?live=all` para partidos/marcadores y `/odds/live`
 ## V4.1 Live
 - API_FOOTBALL_KEY is read only on the server.
 - Default live sync interval: 45 minutes (2,700,000 ms) to stay within the Free plan during testing.
+- Admin → Eventos/cuotas now has "Sincronizar API-Football" for an intentional manual live refresh.
+- The upcoming-real endpoint also imports pre-match odds from `/odds` (cached in PostgreSQL); it never invents a quota.
+- `/api/live/status` exposes provider quota counters but never the API key.
+- The player page refreshes the local live cache every 60 seconds without spending API requests.
 - The player live view only displays API_FOOTBALL events with status LIVE; demo events are not shown there.
 - Diagnostic endpoint: /api/live/status (does not expose the API key).
 - For genuine live betting production, use a higher API plan and a much shorter sync interval appropriate to the provider limits.
