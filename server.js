@@ -113,6 +113,11 @@ async function dbInit(){
  CREATE TABLE IF NOT EXISTS admin_audit(
    id UUID PRIMARY KEY,admin_id UUID REFERENCES users(id) ON DELETE SET NULL,action VARCHAR(80) NOT NULL,target_type VARCHAR(40),target_id UUID,details JSONB DEFAULT '{}'::jsonb,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
  );
+ CREATE TABLE IF NOT EXISTS support_messages(
+   id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, sender_role VARCHAR(20) NOT NULL CHECK(sender_role IN ('USER','ADMIN')),
+   message TEXT NOT NULL CHECK(length(trim(message))>0), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), read_at TIMESTAMPTZ
+ );
+ CREATE INDEX IF NOT EXISTS idx_support_messages_user_created ON support_messages(user_id,created_at ASC);
  `);
  await seedDemoEvents();
 }
@@ -395,6 +400,29 @@ app.post("/api/tickets",auth,ticketLimiter,async(req,res)=>{
 });
 
 // Wallet requests
+// Player betting history / pending bets
+app.get("/api/bets/history",auth,async(req,res)=>{
+  const {rows}=await pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200",[req.user.id]);
+  res.json({tickets:rows});
+});
+app.get("/api/bets/pending",auth,async(req,res)=>{
+  const {rows}=await pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at FROM tickets WHERE user_id=$1 AND status='PENDING' ORDER BY created_at DESC LIMIT 100",[req.user.id]);
+  res.json({tickets:rows});
+});
+
+// Support chat
+app.get("/api/support/messages",auth,async(req,res)=>{
+  const {rows}=await pool.query("SELECT id,sender_role,message,created_at,read_at FROM support_messages WHERE user_id=$1 ORDER BY created_at ASC LIMIT 300",[req.user.id]);
+  await pool.query("UPDATE support_messages SET read_at=NOW() WHERE user_id=$1 AND sender_role='ADMIN' AND read_at IS NULL",[req.user.id]);
+  res.json({messages:rows});
+});
+app.post("/api/support/messages",auth,async(req,res)=>{
+  const message=String(req.body.message||"").trim().slice(0,1000);
+  if(!message)return res.status(400).json({error:"Escribe un mensaje"});
+  const {rows}=await pool.query("INSERT INTO support_messages(id,user_id,sender_role,message) VALUES($1,$2,'USER',$3) RETURNING id,sender_role,message,created_at,read_at",[crypto.randomUUID(),req.user.id,message]);
+  res.status(201).json({message:rows[0]});
+});
+
 app.get("/api/wallet/transactions",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,type,amount_cents,balance_after_cents,reason,created_at FROM balance_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100",[req.user.id]);res.json({transactions:rows})});
 app.get("/api/wallet/requests",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,type,amount_cents,status,note,payout_details,admin_note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",[req.user.id]);res.json({requests:rows})});
 app.post("/api/wallet/requests",auth,async(req,res)=>{const type=req.body.type,amount=Math.trunc(Number(req.body.amountCents)),note=String(req.body.note||"").slice(0,255);if(!['DEPOSIT','WITHDRAWAL'].includes(type)||!Number.isSafeInteger(amount)||amount<100)return res.status(400).json({error:"Solicitud inválida"});const {rows}=await pool.query("INSERT INTO wallet_requests(id,user_id,type,amount_cents,note) VALUES($1,$2,$3,$4,$5) RETURNING *",[crypto.randomUUID(),req.user.id,type,amount,note]);res.status(201).json({request:rows[0]})});
@@ -499,6 +527,23 @@ app.post("/api/admin/wallet-requests/:id/paid",auth,requireAdmin,async(req,res)=
     await audit(req.user.id,"PAY_WITHDRAWAL","wallet_request",x.id,{amount_cents:x.amount_cents});
     res.json({ok:true,status:"PAID"});
   }catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}
+});
+
+app.get("/api/admin/support/conversations",auth,requireAdmin,async(req,res)=>{
+  const {rows}=await pool.query(`SELECT u.id user_id,u.name,u.email,u.phone,MAX(sm.created_at) last_message,COUNT(sm.id)::int message_count,COUNT(sm.id) FILTER (WHERE sm.sender_role='USER' AND sm.read_at IS NULL)::int unread FROM users u JOIN support_messages sm ON sm.user_id=u.id WHERE u.role<>'admin' GROUP BY u.id ORDER BY MAX(sm.created_at) DESC LIMIT 300`);
+  res.json({conversations:rows});
+});
+app.get("/api/admin/support/:userId/messages",auth,requireAdmin,async(req,res)=>{
+  const {rows}=await pool.query("SELECT id,sender_role,message,created_at,read_at FROM support_messages WHERE user_id=$1 ORDER BY created_at ASC LIMIT 500",[req.params.userId]);
+  await pool.query("UPDATE support_messages SET read_at=NOW() WHERE user_id=$1 AND sender_role='USER' AND read_at IS NULL",[req.params.userId]);
+  res.json({messages:rows});
+});
+app.post("/api/admin/support/:userId/messages",auth,requireAdmin,async(req,res)=>{
+  const message=String(req.body.message||"").trim().slice(0,1000);
+  if(!message)return res.status(400).json({error:"Escribe un mensaje"});
+  const {rows}=await pool.query("INSERT INTO support_messages(id,user_id,sender_role,message) VALUES($1,$2,'ADMIN',$3) RETURNING id,sender_role,message,created_at,read_at",[crypto.randomUUID(),req.params.userId,message]);
+  await audit(req.user.id,'SUPPORT_REPLY','user',req.params.userId,{message_length:message.length});
+  res.status(201).json({message:rows[0]});
 });
 
 app.get("/api/admin/audit",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT a.id,a.action,a.target_type,a.target_id,a.details,a.created_at,COALESCE(u.name,'Sistema') admin_name FROM admin_audit a LEFT JOIN users u ON u.id=a.admin_id ORDER BY a.created_at DESC LIMIT 300`);res.json({audit:rows})});

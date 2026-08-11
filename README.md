@@ -93,3 +93,10 @@ Redirect URIs:
 - Mercados de apuestas adicionales por deporte: doble oportunidad, totales, ambos marcan, primer gol, córners, tarjetas, handicap/spread, totales de puntos/juegos/carreras y otros mercados base.
 - El jugador visualiza las selecciones de todos los mercados disponibles del evento.
 - Facebook permanece eliminado; Google OAuth se conserva.
+
+
+## V3.5
+- Historial de apuestas y apartado de apuestas pendientes para jugadores.
+- Chat de soporte jugador ↔ admin con actualización periódica.
+- Panel admin organizado por secciones y menú móvil.
+- Datos de depósito/transferencia editables desde Admin → Depósito.
