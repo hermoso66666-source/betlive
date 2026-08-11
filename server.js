@@ -35,6 +35,10 @@ async function dbInit(){
  );
  ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';
  ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+ ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+ ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+ ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
  CREATE TABLE IF NOT EXISTS balance_transactions(
    id UUID PRIMARY KEY,user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,admin_id UUID REFERENCES users(id) ON DELETE SET NULL,
    type VARCHAR(30) NOT NULL DEFAULT 'ADJUSTMENT',amount_cents BIGINT NOT NULL CHECK(amount_cents<>0),balance_after_cents BIGINT NOT NULL CHECK(balance_after_cents>=0),
@@ -74,6 +78,22 @@ async function dbInit(){
    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),resolved_at TIMESTAMPTZ
  );
  CREATE INDEX IF NOT EXISTS idx_wallet_req_status ON wallet_requests(status,created_at DESC);
+ CREATE TABLE IF NOT EXISTS oauth_accounts(
+   id UUID PRIMARY KEY,
+   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+   provider VARCHAR(20) NOT NULL,
+   provider_subject VARCHAR(255) NOT NULL,
+   email VARCHAR(255),
+   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+   UNIQUE(provider,provider_subject),
+   UNIQUE(user_id,provider)
+ );
+ CREATE TABLE IF NOT EXISTS password_change_log(
+   id UUID PRIMARY KEY,
+   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ );
+
  CREATE TABLE IF NOT EXISTS admin_audit(
    id UUID PRIMARY KEY,admin_id UUID REFERENCES users(id) ON DELETE SET NULL,action VARCHAR(80) NOT NULL,target_type VARCHAR(40),target_id UUID,details JSONB DEFAULT '{}'::jsonb,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
  );
@@ -112,14 +132,204 @@ function validateName(n){return typeof n==="string"&&n.trim().length>=2&&n.trim(
 function validatePassword(p){return typeof p==="string"&&p.length>=8&&p.length<=128}
 function sign(user){if(!JWT_SECRET)throw new Error("JWT_SECRET no configurado");return jwt.sign({sub:user.id},JWT_SECRET,{expiresIn:"7d"})}
 function setAuth(res,user){res.cookie("bl_session",sign(user),{httpOnly:true,secure:process.env.NODE_ENV==="production",sameSite:"lax",maxAge:7*24*60*60*1000,path:"/"})}
-async function auth(req,res,next){try{const token=req.cookies.bl_session;if(!token)return res.status(401).json({error:"No autenticado"});const p=jwt.verify(token,JWT_SECRET);const {rows}=await pool.query("SELECT id,name,email,phone,balance_cents,role,active FROM users WHERE id=$1",[p.sub]);if(!rows[0]||!rows[0].active)return res.status(401).json({error:"Sesión inválida o cuenta bloqueada"});req.user=rows[0];next()}catch{return res.status(401).json({error:"Sesión inválida"})}}
+async function auth(req,res,next){try{const token=req.cookies.bl_session;if(!token)return res.status(401).json({error:"No autenticado"});const p=jwt.verify(token,JWT_SECRET);const {rows}=await pool.query("SELECT id,name,email,phone,balance_cents,role,active,avatar_url,email_verified,provider FROM users WHERE id=$1",[p.sub]);if(!rows[0]||!rows[0].active)return res.status(401).json({error:"Sesión inválida o cuenta bloqueada"});req.user=rows[0];next()}catch{return res.status(401).json({error:"Sesión inválida"})}}
 function requireAdmin(req,res,next){if(!req.user||req.user.role!=="admin")return res.status(403).json({error:"Acceso de administrador requerido"});next()}
 async function audit(admin,action,targetType,targetId,details={}){await pool.query("INSERT INTO admin_audit(id,admin_id,action,target_type,target_id,details) VALUES($1,$2,$3,$4,$5,$6)",[crypto.randomUUID(),admin,action,targetType,targetId||null,JSON.stringify(details)])}
-async function ensureBootstrapAdmin(){const email=cleanEmail(process.env.ADMIN_EMAIL),password=process.env.ADMIN_PASSWORD,name=(process.env.ADMIN_NAME||"Administrador").trim().slice(0,80)||"Administrador";if(!email||!password){console.warn("ADMIN_EMAIL/ADMIN_PASSWORD no configurados");return}if(!validatePassword(password))throw new Error("ADMIN_PASSWORD debe tener entre 8 y 128 caracteres");const hash=await bcrypt.hash(password,12);const existing=await pool.query("SELECT id FROM users WHERE email=$1 LIMIT 1",[email]);if(existing.rows[0])await pool.query("UPDATE users SET role='admin',active=TRUE,name=$1,password_hash=$2 WHERE id=$3",[name,hash,existing.rows[0].id]);else await pool.query("INSERT INTO users(id,name,email,password_hash,role,active) VALUES($1,$2,$3,$4,'admin',TRUE)",[crypto.randomUUID(),name,email,hash]);}
+async function ensureBootstrapAdmin(){const email=cleanEmail(process.env.ADMIN_EMAIL),password=process.env.ADMIN_PASSWORD,name=(process.env.ADMIN_NAME||"Administrador").trim().slice(0,80)||"Administrador";if(!email||!password){console.warn("ADMIN_EMAIL/ADMIN_PASSWORD no configurados");return}if(!validatePassword(password))throw new Error("ADMIN_PASSWORD debe tener entre 8 y 128 caracteres");const hash=await bcrypt.hash(password,12);const existing=await pool.query("SELECT id FROM users WHERE email=$1 LIMIT 1",[email]);if(existing.rows[0])await pool.query("UPDATE users SET role='admin',active=TRUE,name=$1,password_hash=$2,email_verified=TRUE,updated_at=NOW() WHERE id=$3",[name,hash,existing.rows[0].id]);else await pool.query("INSERT INTO users(id,name,email,password_hash,role,active,email_verified) VALUES($1,$2,$3,$4,'admin',TRUE,TRUE)",[crypto.randomUUID(),name,email,hash]);}
+
+
+// OAuth helpers. Secrets/credentials stay only in environment variables.
+const APP_BASE_URL=(process.env.APP_BASE_URL||"").replace(/\/$/,"");
+function baseUrl(req){
+  return APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+}
+function oauthConfigured(provider){
+  if(provider==="google") return !!(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET);
+  if(provider==="facebook") return !!(process.env.FACEBOOK_APP_ID&&process.env.FACEBOOK_APP_SECRET);
+  return false;
+}
+function oauthRedirect(req,provider){
+  return `${baseUrl(req)}/api/auth/${provider}/callback`;
+}
+function setOAuthState(res,provider,action="login"){
+  const state=crypto.randomBytes(32).toString("hex");
+  res.cookie("bl_oauth_state",`${provider}.${action}.${state}`,{
+    httpOnly:true,secure:process.env.NODE_ENV==="production",sameSite:"lax",
+    maxAge:10*60*1000,path:"/"
+  });
+  return state;
+}
+function takeOAuthState(req,res,provider,action){
+  const raw=req.cookies.bl_oauth_state||"";
+  res.clearCookie("bl_oauth_state",{httpOnly:true,secure:process.env.NODE_ENV==="production",sameSite:"lax",path:"/"});
+  const parts=raw.split(".");
+  if(parts.length!==3||parts[0]!==provider||parts[1]!==action||!req.query.state)return false;
+  try{return crypto.timingSafeEqual(Buffer.from(parts[2]),Buffer.from(String(req.query.state)))}catch{return false}
+}
+async function currentUserFromCookie(req){
+  try{
+    const token=req.cookies.bl_session;if(!token||!JWT_SECRET)return null;
+    const p=jwt.verify(token,JWT_SECRET);
+    const r=await pool.query("SELECT id,name,email,phone,balance_cents,role,active,avatar_url,email_verified,provider FROM users WHERE id=$1",[p.sub]);
+    return r.rows[0]||null;
+  }catch{return null}
+}
+function oauthError(res,msg){return res.redirect("/?oauth_error="+encodeURIComponent(msg));}
+async function findOrCreateOAuthUser({provider,subject,name,email,avatar,emailVerified,linkUserId=null}){
+  const normalized=cleanEmail(email);
+  if(linkUserId){
+    const existing=await pool.query("SELECT user_id FROM oauth_accounts WHERE provider=$1 AND provider_subject=$2",[provider,subject]);
+    if(existing.rows[0]&&existing.rows[0].user_id!==linkUserId)throw new Error("Esa cuenta ya está vinculada a otro usuario");
+    await pool.query(`INSERT INTO oauth_accounts(id,user_id,provider,provider_subject,email) VALUES($1,$2,$3,$4,$5)
+      ON CONFLICT(provider,provider_subject) DO UPDATE SET email=EXCLUDED.email`,[crypto.randomUUID(),linkUserId,provider,subject,normalized]);
+    await pool.query(`UPDATE users SET provider_subject=COALESCE(provider_subject,$1),avatar_url=COALESCE($2,avatar_url),
+      email_verified=CASE WHEN $3 THEN TRUE ELSE email_verified END,updated_at=NOW() WHERE id=$4`,
+      [subject,avatar||null,!!emailVerified,linkUserId]);
+    return (await pool.query("SELECT id,name,email,phone,balance_cents,role,active,avatar_url,email_verified,provider FROM users WHERE id=$1",[linkUserId])).rows[0];
+  }
+  const byProvider=await pool.query("SELECT u.* FROM users u JOIN oauth_accounts a ON a.user_id=u.id WHERE a.provider=$1 AND a.provider_subject=$2 LIMIT 1",[provider,subject]);
+  if(byProvider.rows[0]){
+    if(!byProvider.rows[0].active)throw new Error("Cuenta bloqueada");
+    return byProvider.rows[0];
+  }
+  if(normalized){
+    const byEmail=await pool.query("SELECT * FROM users WHERE email=$1 LIMIT 1",[normalized]);
+    if(byEmail.rows[0]){
+      if(provider==="google" && emailVerified){
+        await pool.query("INSERT INTO oauth_accounts(id,user_id,provider,provider_subject,email) VALUES($1,$2,$3,$4,$5) ON CONFLICT(provider,provider_subject) DO NOTHING",
+          [crypto.randomUUID(),byEmail.rows[0].id,provider,subject,normalized]);
+        await pool.query("UPDATE users SET email_verified=TRUE,avatar_url=COALESCE($1,avatar_url),updated_at=NOW() WHERE id=$2",[avatar||null,byEmail.rows[0].id]);
+        return (await pool.query("SELECT * FROM users WHERE id=$1",[byEmail.rows[0].id])).rows[0];
+      }
+      throw new Error("Ya existe una cuenta con ese correo. Inicia sesión con tu contraseña y vincula la cuenta desde Perfil.");
+    }
+  }
+  const id=crypto.randomUUID();
+  const r=await pool.query(`INSERT INTO users(id,name,email,password_hash,provider,provider_subject,avatar_url,email_verified,balance_cents)
+    VALUES($1,$2,$3,NULL,$4,$5,$6,$7,0) RETURNING *`,
+    [id,(name||"Usuario").trim().slice(0,80)||"Usuario",normalized,provider,subject,avatar||null,!!emailVerified]);
+  await pool.query("INSERT INTO oauth_accounts(id,user_id,provider,provider_subject,email) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
+    [crypto.randomUUID(),id,provider,subject,normalized]);
+  return r.rows[0];
+}
+
+app.get("/api/auth/google",authLimiter,(req,res)=>{
+  if(!oauthConfigured("google"))return res.status(503).send("Google OAuth no está configurado.");
+  const action=req.query.action==="link"?"link":"login",state=setOAuthState(res,"google",action);
+  const u=new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  u.searchParams.set("client_id",process.env.GOOGLE_CLIENT_ID);
+  u.searchParams.set("redirect_uri",oauthRedirect(req,"google"));
+  u.searchParams.set("response_type","code");
+  u.searchParams.set("scope","openid email profile");
+  u.searchParams.set("state",state);
+  u.searchParams.set("access_type","online");
+  u.searchParams.set("prompt","select_account");
+  res.redirect(u.toString());
+});
+app.get("/api/auth/google/callback",async(req,res)=>{
+  try{
+    const action=(req.cookies.bl_oauth_state||"").split(".")[1]||"login";
+    if(!takeOAuthState(req,res,"google",action))return oauthError(res,"Estado OAuth inválido o expirado");
+    if(req.query.error)return oauthError(res,"Google canceló el inicio de sesión");
+    if(!req.query.code)return oauthError(res,"Google no devolvió el código");
+    const body=new URLSearchParams({code:req.query.code,client_id:process.env.GOOGLE_CLIENT_ID,client_secret:process.env.GOOGLE_CLIENT_SECRET,redirect_uri:oauthRedirect(req,"google"),grant_type:"authorization_code"});
+    const tr=await fetch("https://oauth2.googleapis.com/token",{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body});
+    const tokens=await tr.json();
+    if(!tr.ok||!tokens.access_token)throw new Error("No se pudo obtener el token de Google");
+    const ur=await fetch("https://openidconnect.googleapis.com/v1/userinfo",{headers:{Authorization:`Bearer ${tokens.access_token}`}});
+    const info=await ur.json();
+    if(!ur.ok||!info.sub||!info.email)throw new Error("Google no devolvió un perfil válido");
+    let linkUserId=null;
+    if(action==="link"){const me=await currentUserFromCookie(req);if(!me)return oauthError(res,"Debes iniciar sesión para vincular Google");linkUserId=me.id;}
+    const u=await findOrCreateOAuthUser({provider:"google",subject:info.sub,name:info.name,email:info.email,avatar:info.picture,emailVerified:!!info.email_verified,linkUserId});
+    if(!linkUserId)setAuth(res,u);
+    res.redirect("/?oauth=success");
+  }catch(e){console.error("Google OAuth:",e);oauthError(res,e.message||"No se pudo iniciar sesión con Google")}
+});
+
+app.get("/api/auth/facebook",authLimiter,(req,res)=>{
+  if(!oauthConfigured("facebook"))return res.status(503).send("Facebook OAuth no está configurado.");
+  const action=req.query.action==="link"?"link":"login",state=setOAuthState(res,"facebook",action);
+  const version=process.env.FACEBOOK_GRAPH_VERSION||"v25.0";
+  const u=new URL(`https://www.facebook.com/${version}/dialog/oauth`);
+  u.searchParams.set("client_id",process.env.FACEBOOK_APP_ID);
+  u.searchParams.set("redirect_uri",oauthRedirect(req,"facebook"));
+  u.searchParams.set("response_type","code");
+  u.searchParams.set("scope","public_profile,email");
+  u.searchParams.set("state",state);
+  res.redirect(u.toString());
+});
+app.get("/api/auth/facebook/callback",async(req,res)=>{
+  try{
+    const action=(req.cookies.bl_oauth_state||"").split(".")[1]||"login";
+    if(!takeOAuthState(req,res,"facebook",action))return oauthError(res,"Estado OAuth inválido o expirado");
+    if(req.query.error)return oauthError(res,"Facebook canceló el inicio de sesión");
+    if(!req.query.code)return oauthError(res,"Facebook no devolvió el código");
+    const version=process.env.FACEBOOK_GRAPH_VERSION||"v25.0";
+    const tokenUrl=new URL(`https://graph.facebook.com/${version}/oauth/access_token`);
+    tokenUrl.searchParams.set("client_id",process.env.FACEBOOK_APP_ID);
+    tokenUrl.searchParams.set("client_secret",process.env.FACEBOOK_APP_SECRET);
+    tokenUrl.searchParams.set("redirect_uri",oauthRedirect(req,"facebook"));
+    tokenUrl.searchParams.set("code",req.query.code);
+    const tr=await fetch(tokenUrl);
+    const tokens=await tr.json();
+    if(!tr.ok||!tokens.access_token)throw new Error("No se pudo obtener el token de Facebook");
+    const meUrl=new URL(`https://graph.facebook.com/${version}/me`);
+    meUrl.searchParams.set("fields","id,name,email,picture.type(large)");
+    meUrl.searchParams.set("access_token",tokens.access_token);
+    const mr=await fetch(meUrl);
+    const info=await mr.json();
+    if(!mr.ok||!info.id)throw new Error("Facebook no devolvió un perfil válido");
+    let linkUserId=null;
+    if(action==="link"){const me=await currentUserFromCookie(req);if(!me)return oauthError(res,"Debes iniciar sesión para vincular Facebook");linkUserId=me.id;}
+    const avatar=info.picture?.data?.url||null;
+    const u=await findOrCreateOAuthUser({provider:"facebook",subject:info.id,name:info.name,email:info.email,avatar,emailVerified:false,linkUserId});
+    if(!linkUserId)setAuth(res,u);
+    res.redirect("/?oauth=success");
+  }catch(e){console.error("Facebook OAuth:",e);oauthError(res,e.message||"No se pudo iniciar sesión con Facebook")}
+});
+
+// Profile / wallet
+app.get("/api/profile",auth,async(req,res)=>{
+  const r=await pool.query(`SELECT id,name,email,phone,balance_cents,role,active,avatar_url,email_verified,provider,created_at FROM users WHERE id=$1`,[req.user.id]);
+  const tx=await pool.query(`SELECT id,type,amount_cents,balance_after_cents,reason,created_at FROM balance_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`,[req.user.id]);
+  const wr=await pool.query(`SELECT id,type,amount_cents,status,note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30`,[req.user.id]);
+  res.json({profile:r.rows[0],transactions:tx.rows,requests:wr.rows});
+});
+app.patch("/api/profile",auth,async(req,res)=>{
+  try{
+    const name=req.body.name?.trim(),phone=cleanPhone(req.body.phone);
+    if(!validateName(name)||phone&&phone.length>30)return res.status(400).json({error:"Datos de perfil inválidos"});
+    const duplicate=await pool.query("SELECT id FROM users WHERE phone=$1 AND id<>$2",[phone,req.user.id]);
+    if(phone&&duplicate.rowCount)return res.status(409).json({error:"Ese teléfono ya está registrado"});
+    const r=await pool.query(`UPDATE users SET name=$1,phone=$2,updated_at=NOW() WHERE id=$3
+      RETURNING id,name,email,phone,balance_cents,role,active,avatar_url,email_verified,provider`,[name,phone||null,req.user.id]);
+    res.json({user:r.rows[0]});
+  }catch(e){console.error(e);res.status(500).json({error:"No se pudo actualizar el perfil"})}
+});
+app.post("/api/profile/password",auth,authLimiter,async(req,res)=>{
+  try{
+    const current=req.body.currentPassword,newPassword=req.body.newPassword;
+    if(!validatePassword(newPassword))return res.status(400).json({error:"La nueva contraseña debe tener entre 8 y 128 caracteres"});
+    const r=await pool.query("SELECT password_hash FROM users WHERE id=$1",[req.user.id]);
+    if(!r.rows[0]?.password_hash||!(await bcrypt.compare(current||"",r.rows[0].password_hash)))return res.status(401).json({error:"Contraseña actual incorrecta"});
+    const hash=await bcrypt.hash(newPassword,12);
+    await pool.query("UPDATE users SET password_hash=$1,provider='local',updated_at=NOW() WHERE id=$2",[hash,req.user.id]);
+    await pool.query("INSERT INTO password_change_log(id,user_id) VALUES($1,$2)",[crypto.randomUUID(),req.user.id]);
+    res.json({ok:true});
+  }catch(e){console.error(e);res.status(500).json({error:"No se pudo cambiar la contraseña"})}
+});
+app.post("/api/wallet/requests",auth,async(req,res)=>{
+  const type=req.body.type,amount=Math.round(Number(req.body.amount)*100);
+  if(!["DEPOSIT","WITHDRAWAL"].includes(type)||!Number.isSafeInteger(amount)||amount<=0)return res.status(400).json({error:"Solicitud inválida"});
+  if(amount>100000000)return res.status(400).json({error:"Cantidad fuera de rango"});
+  const r=await pool.query("INSERT INTO wallet_requests(id,user_id,type,amount_cents,note) VALUES($1,$2,$3,$4,$5) RETURNING *",[crypto.randomUUID(),req.user.id,type,amount,String(req.body.note||"").slice(0,255)]);
+  res.status(201).json({request:r.rows[0]});
+});
 
 // Auth
-app.post("/api/auth/register",authLimiter,async(req,res)=>{try{const name=req.body.name?.trim(),email=cleanEmail(req.body.email),phone=cleanPhone(req.body.phone),password=req.body.password;if(!validateName(name)||(!email&&!phone)||!validatePassword(password))return res.status(400).json({error:"Datos de registro inválidos"});const exists=await pool.query("SELECT id FROM users WHERE (email=$1 AND $1 IS NOT NULL) OR (phone=$2 AND $2 IS NOT NULL)",[email,phone]);if(exists.rowCount)return res.status(409).json({error:"La cuenta ya existe"});const hash=await bcrypt.hash(password,12),id=crypto.randomUUID();const {rows}=await pool.query("INSERT INTO users(id,name,email,phone,password_hash,balance_cents) VALUES($1,$2,$3,$4,$5,0) RETURNING id,name,email,phone,balance_cents,role",[id,name,email,phone,hash]);setAuth(res,rows[0]);res.status(201).json({user:rows[0]})}catch(e){console.error(e);res.status(500).json({error:"Error del servidor"})}});
-app.post("/api/auth/login",authLimiter,async(req,res)=>{try{const identifier=(req.body.identifier||"").trim().toLowerCase(),password=req.body.password;if(identifier.length<3||!validatePassword(password))return res.status(400).json({error:"Datos inválidos"});const {rows}=await pool.query("SELECT * FROM users WHERE lower(coalesce(email,''))=$1 OR phone=$2 LIMIT 1",[identifier,identifier]);if(!rows[0]||!rows[0].active||!rows[0].password_hash||!(await bcrypt.compare(password,rows[0].password_hash)))return res.status(401).json({error:rows[0]&&!rows[0].active?"Cuenta bloqueada":"Credenciales incorrectas"});setAuth(res,rows[0]);res.json({user:{id:rows[0].id,name:rows[0].name,email:rows[0].email,phone:rows[0].phone,balance_cents:rows[0].balance_cents,role:rows[0].role}})}catch(e){console.error(e);res.status(500).json({error:"Error del servidor"})}});
+app.post("/api/auth/register",authLimiter,async(req,res)=>{try{const name=req.body.name?.trim(),email=cleanEmail(req.body.email),phone=cleanPhone(req.body.phone),password=req.body.password;if(!validateName(name)||(!email&&!phone)||!validatePassword(password))return res.status(400).json({error:"Datos de registro inválidos"});const exists=await pool.query("SELECT id FROM users WHERE (email=$1 AND $1 IS NOT NULL) OR (phone=$2 AND $2 IS NOT NULL)",[email,phone]);if(exists.rowCount)return res.status(409).json({error:"La cuenta ya existe"});const hash=await bcrypt.hash(password,12),id=crypto.randomUUID();const {rows}=await pool.query("INSERT INTO users(id,name,email,phone,password_hash,balance_cents) VALUES($1,$2,$3,$4,$5,0) RETURNING id,name,email,phone,balance_cents,role,avatar_url,email_verified,provider",[id,name,email,phone,hash]);setAuth(res,rows[0]);res.status(201).json({user:rows[0]})}catch(e){console.error(e);res.status(500).json({error:"Error del servidor"})}});
+app.post("/api/auth/login",authLimiter,async(req,res)=>{try{const identifier=(req.body.identifier||"").trim().toLowerCase(),password=req.body.password;if(identifier.length<3||!validatePassword(password))return res.status(400).json({error:"Datos inválidos"});const {rows}=await pool.query("SELECT * FROM users WHERE lower(coalesce(email,''))=$1 OR phone=$2 LIMIT 1",[identifier,identifier]);if(!rows[0]||!rows[0].active||!rows[0].password_hash||!(await bcrypt.compare(password,rows[0].password_hash)))return res.status(401).json({error:rows[0]&&!rows[0].active?"Cuenta bloqueada":"Credenciales incorrectas"});setAuth(res,rows[0]);res.json({user:{id:rows[0].id,name:rows[0].name,email:rows[0].email,phone:rows[0].phone,balance_cents:rows[0].balance_cents,role:rows[0].role,avatar_url:rows[0].avatar_url,email_verified:rows[0].email_verified,provider:rows[0].provider}})}catch(e){console.error(e);res.status(500).json({error:"Error del servidor"})}});
 app.post("/api/auth/logout",auth,(req,res)=>{res.clearCookie("bl_session",{httpOnly:true,secure:process.env.NODE_ENV==="production",sameSite:"lax",path:"/"});res.json({ok:true})});
 app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 

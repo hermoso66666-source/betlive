@@ -20,3 +20,58 @@ $("#login").onclick=async()=>{try{let d=await api("/api/auth/login",{method:"POS
 $$('[data-oauth]').forEach(b=>b.onclick=()=>toast("Google/Facebook se conectan en la siguiente etapa OAuth"));
 setInterval(()=>loadEvents(),15000);
 (async()=>{await loadMe();await loadEvents();renderSlip()})();
+
+async function loadProfile(){
+  if(!user)return;
+  try{
+    const d=await api("/api/profile"),p=d.profile;
+    $("#profileName").textContent=p.name||"Mi perfil";
+    $("#profileEmail").textContent=p.email||p.phone||"";
+    $("#pfName").value=p.name||"";
+    $("#pfPhone").value=p.phone||"";
+    $("#pfEmail").value=p.email||"";
+    $("#profileBalance").textContent=money(p.balance_cents);
+    const av=$("#profileAvatar");
+    av.innerHTML=p.avatar_url?`<img src="${p.avatar_url}" alt="">`:(p.name||"U")[0].toUpperCase();
+    $("#walletHistory").innerHTML=d.transactions.length?d.transactions.map(x=>`<div class="profile-row"><b>${x.type}</b> · ${money(x.amount_cents)}<small>${x.reason} · ${new Date(x.created_at).toLocaleString("es-MX")}</small></div>`).join(""):"<div class=empty>Sin movimientos todavía.</div>";
+  }catch(e){toast(e.message)}
+}
+function openProfile(){if(!user)return openAuth();$("#profileModal").classList.remove("hidden");loadProfile()}
+$("#account").onclick=openProfile;
+$("#closeProfile").onclick=()=>$("#profileModal").classList.add("hidden");
+$("#editProfile").onclick=()=>{
+  ["#pfName","#pfPhone"].forEach(s=>$(s).disabled=false);
+  $("#pfEmail").disabled=true;$("#saveProfile").classList.remove("hidden");
+};
+$("#saveProfile").onclick=async()=>{
+  try{
+    const d=await api("/api/profile",{method:"PATCH",body:JSON.stringify({name:$("#pfName").value,phone:$("#pfPhone").value})});
+    user=d.user;await loadMe();await loadProfile();$("#saveProfile").classList.add("hidden");["#pfName","#pfPhone"].forEach(s=>$(s).disabled=true);toast("Perfil actualizado ✓");
+  }catch(e){toast(e.message)}
+};
+$("#logout").onclick=async()=>{try{await api("/api/auth/logout",{method:"POST"});user=null;$("#profileModal").classList.add("hidden");await loadMe();renderSlip();toast("Sesión cerrada")}catch(e){toast(e.message)}};
+let walletType="DEPOSIT";
+function openWallet(type){walletType=type;$("#walletTitle").textContent=type==="DEPOSIT"?"Solicitar depósito":"Solicitar retiro";$("#walletAmount").value="";$("#walletNote").value="";$("#walletModal").classList.remove("hidden")}
+$("#depositBtn").onclick=()=>openWallet("DEPOSIT");$("#withdrawBtn").onclick=()=>openWallet("WITHDRAWAL");
+$("#closeWallet").onclick=()=>$("#walletModal").classList.add("hidden");
+$("#walletSubmit").onclick=async()=>{
+  try{
+    const amount=Number($("#walletAmount").value);
+    if(!Number.isFinite(amount)||amount<=0)return toast("Cantidad inválida");
+    await api("/api/wallet/requests",{method:"POST",body:JSON.stringify({type:walletType,amount,note:$("#walletNote").value})});
+    $("#walletModal").classList.add("hidden");await loadProfile();toast("Solicitud enviada ✓");
+  }catch(e){toast(e.message)}
+};
+$("#changePasswordBtn").onclick=()=>$("#passwordModal").classList.remove("hidden");
+$("#closePassword").onclick=()=>$("#passwordModal").classList.add("hidden");
+$("#passwordSubmit").onclick=async()=>{
+  try{
+    await api("/api/profile/password",{method:"POST",body:JSON.stringify({currentPassword:$("#currentPassword").value,newPassword:$("#newPassword").value})});
+    $("#passwordModal").classList.add("hidden");$("#currentPassword").value="";$("#newPassword").value="";toast("Contraseña actualizada ✓");
+  }catch(e){toast(e.message)}
+};
+(async()=>{
+  const q=new URLSearchParams(location.search);
+  if(q.get("oauth")==="success"){history.replaceState({},document.title,"/");toast("Sesión OAuth iniciada ✓")}
+  if(q.get("oauth_error")){const msg=q.get("oauth_error");history.replaceState({},document.title,"/");setTimeout(()=>toast(msg),300)}
+})();
