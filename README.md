@@ -112,3 +112,11 @@ Agrega en Render:
 - `LIVE_SYNC_INTERVAL_MS=60000` (ajústalo según tu plan/cuota de API).
 
 La integración usa `/fixtures?live=all` para partidos/marcadores y `/odds/live` para cuotas en vivo. La API key solo se utiliza en el backend.
+
+
+## V4.1 Live
+- API_FOOTBALL_KEY is read only on the server.
+- Default live sync interval: 45 minutes (2,700,000 ms) to stay within the Free plan during testing.
+- The player live view only displays API_FOOTBALL events with status LIVE; demo events are not shown there.
+- Diagnostic endpoint: /api/live/status (does not expose the API key).
+- For genuine live betting production, use a higher API plan and a much shorter sync interval appropriate to the provider limits.

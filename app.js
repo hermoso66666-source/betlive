@@ -1,4 +1,4 @@
-let M=[],sport="Todos",filter="all",slip=[],type="single",quick=null,quickMode=false,user=null;
+let M=[],sport="Todos",filter="all",slip=[],type="single",quick=null,quickMode=false,user=null,liveOnly=false;
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s),money=c=>"$"+(Number(c)/100).toLocaleString("es-MX",{minimumFractionDigits:2}),toast=t=>{let x=$("#toast");x.textContent=t;x.classList.add("show");setTimeout(()=>x.classList.remove("show"),1800)};
 async function api(url,opt={}){let r=await fetch(url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opt.headers||{})},...opt});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||"Error");return d}
 function normalizeEvents(events){return events.map(e=>{
@@ -6,7 +6,7 @@ function normalizeEvents(events){return events.map(e=>{
   const odds=markets.flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})));
   return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,markets,odds}
 })}
-async function loadEvents(){try{const d=await api("/api/events");M=normalizeEvents(d.events);render()}catch(e){toast(e.message)}}
+async function loadEvents(forceLive=liveOnly){try{liveOnly=forceLive;const d=await api(`/api/events?live=${liveOnly}`);M=normalizeEvents(d.events);render()}catch(e){toast(e.message)}}
 async function loadMe(){try{let d=await api("/api/me");user=d.user;$("#balance").textContent=money(user.balance_cents);$("#account").textContent=(user.name||"U")[0].toUpperCase()}catch{user=null;$("#balance").textContent="$0.00"}}
 async function loadTickets(mode="all"){
   if(!user){$("#history").innerHTML="<div class=empty>Inicia sesión para ver tus apuestas.</div>";return}
@@ -38,7 +38,7 @@ function render(){
       <div class="event" style="padding-top:0"><span></span><div class="team">${escapeHtml(m.away)}<small>${m.score[1]}</small></div></div>
       ${marketHtml||'<div class="empty">Sin mercados disponibles en este momento.</div>'}
     </article>`;
-  }).join("")||"<div class=empty>No hay eventos disponibles.</div>";
+  }).join("")||(liveOnly?"<div class=empty>🔴 No hay partidos reales en vivo en este momento. Cuando API-Football detecte un partido en directo aparecerá aquí automáticamente.</div>":"<div class=empty>No hay eventos disponibles.</div>");
   $$('.odd').forEach(b=>b.onclick=()=>pickSelection(b.dataset.id,b.dataset.sid));
   renderSlip()
 }
@@ -72,15 +72,15 @@ async function loadWithdrawalRequests(){
 
 $$('[data-sport]').forEach(b=>b.onclick=()=>{sport=b.dataset.sport;$("#drawer").classList.add("hidden");render()});$$('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;$$('[data-filter]').forEach(x=>x.classList.toggle("active",x===b));render()});$("#search").oninput=render;$("#stake").oninput=renderSlip;$$('.quickmoney button').forEach(b=>b.onclick=()=>{$("#stake").value=Number(b.dataset.a);renderSlip()});$("#clear").onclick=()=>{slip=[];render()};$$('[data-type]').forEach(b=>b.onclick=()=>{type=b.dataset.type;$$('[data-type]').forEach(x=>x.classList.toggle("active",x===b));if(type==="single"&&slip.length>1)slip=slip.slice(-1);render()});
 $$('[data-tab]').forEach(b=>b.onclick=()=>{quickMode=b.dataset.tab==="quick";$("#normalPanel").classList.toggle("hidden",quickMode);$("#quickPanel").classList.toggle("hidden",!quickMode);$$('[data-tab]').forEach(x=>x.classList.toggle("active",x===b))});
-$("#menu").onclick=()=>$("#drawer").classList.remove("hidden");$("#closeDrawer").onclick=()=>$("#drawer").classList.add("hidden");$("#drawerLive").onclick=()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden")};$("#drawerBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");$("#drawer").classList.add("hidden");loadTickets("all")};$("#drawerPending").onclick=()=>{$("#drawer").classList.add("hidden");loadWithdrawalRequests()};$("#drawerProfile").onclick=()=>{$("#drawer").classList.add("hidden");openProfile()};$("#drawerHelp").onclick=()=>{$("#drawer").classList.add("hidden");openSupport()};$("#mobileSlip").onclick=()=>$("#betSlip").classList.toggle("mobile-open");$("#ticketTop").onclick=()=>{if(window.innerWidth<=700)$("#mobileSlip").click();else document.querySelector(".slip").scrollIntoView({behavior:"smooth"})};
-$("#showBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");loadTickets("all")};$("#showLive").onclick=()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden")};
+$("#menu").onclick=()=>$("#drawer").classList.remove("hidden");$("#closeDrawer").onclick=()=>$("#drawer").classList.add("hidden");$("#drawerLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadEvents(true)};$("#drawerBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");$("#drawer").classList.add("hidden");loadTickets("all")};$("#drawerPending").onclick=()=>{$("#drawer").classList.add("hidden");loadWithdrawalRequests()};$("#drawerProfile").onclick=()=>{$("#drawer").classList.add("hidden");openProfile()};$("#drawerHelp").onclick=()=>{$("#drawer").classList.add("hidden");openSupport()};$("#mobileSlip").onclick=()=>$("#betSlip").classList.toggle("mobile-open");$("#ticketTop").onclick=()=>{if(window.innerWidth<=700)$("#mobileSlip").click();else document.querySelector(".slip").scrollIntoView({behavior:"smooth"})};
+$("#showBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");loadTickets("all")};$("#showLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadEvents(true)};
 function openAuth(){if(user){toast("Sesión activa");return}$("#auth").classList.remove("hidden");$("#loginBox").classList.remove("hidden");$("#registerBox").classList.add("hidden")}$("#account").onclick=openAuth;$("#closeAuth").onclick=()=>$("#auth").classList.add("hidden");$("#registerLink").onclick=()=>{$("#loginBox").classList.add("hidden");$("#registerBox").classList.remove("hidden")};$("#loginLink").onclick=()=>{$("#registerBox").classList.add("hidden");$("#loginBox").classList.remove("hidden")};
 $("#register").onclick=async()=>{try{let n=$("#rn").value.trim(),c=$("#rc").value.trim(),p=$("#rp").value;if(!n||!c||p.length<8)return toast("Completa los datos");let body=c.includes("@")?{name:n,email:c,password:p}:{name:n,phone:c,password:p};let d=await api("/api/auth/register",{method:"POST",body:JSON.stringify(body)});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Cuenta creada ✓")}catch(e){toast(e.message)}};
 $("#login").onclick=async()=>{try{let d=await api("/api/auth/login",{method:"POST",body:JSON.stringify({identifier:$("#lc").value.trim(),password:$("#lp").value})});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Sesión iniciada ✓")}catch(e){toast(e.message)}};
 $$('[data-oauth]').forEach(b=>b.onclick=()=>{ window.location.href="/api/auth/google?action=login"; });
 $$('[data-link-oauth]').forEach(b=>b.onclick=()=>{ const provider=b.dataset.linkOauth; if(provider==="google") window.location.href="/api/auth/google?action=link"; });
 setInterval(()=>loadEvents(),15000);
-(async()=>{await loadMe();await loadEvents();renderSlip()})();
+(async()=>{await loadMe();await loadEvents(true);renderSlip()})();
 
 let supportTimer=null;
 function supportBubble(m){const mine=m.sender_role==='USER';return `<div class="support-msg ${mine?'mine':'admin'}"><b>${mine?'Tú':'Soporte BetLive'}</b><p>${escapeHtml(m.message)}</p><small>${new Date(m.created_at).toLocaleString('es-MX')}</small></div>`}

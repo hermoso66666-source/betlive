@@ -25,7 +25,7 @@ const PORT=process.env.PORT||10000;
 const API_FOOTBALL_KEY=process.env.API_FOOTBALL_KEY||"";
 const API_FOOTBALL_BASE=(process.env.API_FOOTBALL_BASE_URL||"https://v3.football.api-sports.io").replace(/\/$/,"");
 const LIVE_SYNC_ENABLED=String(process.env.LIVE_SYNC_ENABLED??"true").toLowerCase()!=="false";
-const LIVE_SYNC_INTERVAL_MS=Math.max(15000,Number(process.env.LIVE_SYNC_INTERVAL_MS||60000));
+const LIVE_SYNC_INTERVAL_MS=Math.max(300000,Number(process.env.LIVE_SYNC_INTERVAL_MS||2700000));
 const authLimiter=rateLimit({windowMs:15*60*1000,max:40,standardHeaders:true,legacyHeaders:false});
 const ticketLimiter=rateLimit({windowMs:60*1000,max:20,standardHeaders:true,legacyHeaders:false});
 
@@ -390,7 +390,7 @@ app.post("/api/auth/logout",auth,(req,res)=>{res.clearCookie("bl_session",{httpO
 app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 
 // Public catalog
-app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 200`);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
+app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') AND (COALESCE($1::boolean,FALSE)=FALSE OR (e.external_source='API_FOOTBALL' AND e.status='LIVE')) GROUP BY e.id ORDER BY e.starts_at LIMIT 200`,[req.query.live === "true"]);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
 app.get("/api/quinielas",async(req,res)=>{const {rows}=await pool.query("SELECT id,name,kind,price_cents,description,active,close_at,prize_text FROM quinielas WHERE active=TRUE ORDER BY price_cents");res.json({quinielas:rows})});
 
 // Tickets: server validates selected odds against DB
@@ -600,6 +600,8 @@ function cleanMarketName(name){
 function liveSelectionKey(fixtureId,betId,value){
   return `api-football:live:${fixtureId}:${betId}:${String(value)}`.slice(0,240);
 }
+let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,error:null,configured:Boolean(API_FOOTBALL_KEY)};
+
 async function syncApiFootballLive(){
   if(!LIVE_SYNC_ENABLED || !API_FOOTBALL_KEY) return {enabled:LIVE_SYNC_ENABLED,configured:false,fixtures:0,odds:0};
   const started=Date.now();
@@ -684,22 +686,26 @@ async function syncApiFootballLive(){
   }else{
     await pool.query("UPDATE sports_events SET status='CLOSED',last_synced_at=NOW() WHERE external_source='API_FOOTBALL' AND external_id IS NOT NULL");
   }
-  return {enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,markets:marketCount,selections:selectionCount,elapsedMs:Date.now()-started};
+  const result={enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,markets:marketCount,selections:selectionCount,elapsedMs:Date.now()-started};
+  liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:result.fixtures,odds:result.odds,markets:result.markets,selections:result.selections,error:null,configured:true};
+  return result;
 }
 async function startLiveSync(){
   if(!LIVE_SYNC_ENABLED) return;
   const run=async()=>{
     try{
       const result=await syncApiFootballLive();
+      liveSyncState.lastRunAt=new Date().toISOString();
       if(result.configured) console.log("API-Football live sync",result);
-    }catch(e){console.error("API-Football live sync error:",e.message)}
+    }catch(e){liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),error:e.message,configured:Boolean(API_FOOTBALL_KEY)};console.error("API-Football live sync error:",e.message)}
   };
   await run();
   setInterval(run,LIVE_SYNC_INTERVAL_MS);
 }
 
 let dbReady=false;
-app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS}}));
+app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,state:liveSyncState}}));
+app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,...liveSyncState}));
 app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin/",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin.html",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
