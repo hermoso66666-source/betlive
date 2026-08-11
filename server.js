@@ -391,6 +391,38 @@ app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 
 // Public catalog
 app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') AND (COALESCE($1::boolean,FALSE)=FALSE OR (e.external_source='API_FOOTBALL' AND e.status='LIVE')) GROUP BY e.id ORDER BY e.starts_at LIMIT 200`,[req.query.live === "true"]);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
+const upcomingLimiter=rateLimit({windowMs:10*60*1000,max:1,standardHeaders:true,legacyHeaders:false});
+app.get("/api/events/upcoming-real",upcomingLimiter,async(req,res)=>{
+  try{
+    if(!API_FOOTBALL_KEY) return res.status(503).json({error:"API-Football no configurada"});
+    const data=await apiFootballGet("/fixtures?next=20");
+    const fixtures=Array.isArray(data.response)?data.response:[];
+    for(const f of fixtures){
+      const fid=String(f?.fixture?.id||""); if(!fid) continue;
+      const status=apiFixtureStatus(f);
+      if(status!=="OPEN") continue;
+      const leagueName=f.league?.name||`Liga ${f.league?.id||""}`;
+      const home=f.teams?.home?.name||`Local ${f.teams?.home?.id||""}`;
+      const away=f.teams?.away?.name||`Visitante ${f.teams?.away?.id||""}`;
+      const starts=f.fixture?.date||new Date().toISOString();
+      await pool.query(`
+        INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,featured,video,external_source,external_id,last_synced_at)
+        VALUES($1,'Fútbol',$2,$3,$4,$5,'OPEN',0,0,FALSE,FALSE,'API_FOOTBALL',$6,NOW())
+        ON CONFLICT (external_source,external_id) WHERE external_id IS NOT NULL
+        DO UPDATE SET league=EXCLUDED.league,home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,starts_at=EXCLUDED.starts_at,status=CASE WHEN sports_events.status='LIVE' THEN 'LIVE' ELSE 'OPEN' END,last_synced_at=NOW()
+      `,[deterministicUuid(`event:${fid}`),leagueName,home,away,starts,fid]);
+    }
+    const {rows}=await pool.query(`
+      SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,
+      COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets
+      FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id
+      WHERE e.external_source='API_FOOTBALL' AND e.status='OPEN' AND e.starts_at>=NOW()
+      GROUP BY e.id ORDER BY e.starts_at LIMIT 50
+    `);
+    res.json({events:rows,source:"API_FOOTBALL",fetched:fixtures.length});
+  }catch(e){console.error("upcoming-real",e);res.status(502).json({error:e.message||"No se pudieron cargar partidos reales"})}
+});
+
 app.get("/api/quinielas",async(req,res)=>{const {rows}=await pool.query("SELECT id,name,kind,price_cents,description,active,close_at,prize_text FROM quinielas WHERE active=TRUE ORDER BY price_cents");res.json({quinielas:rows})});
 
 // Tickets: server validates selected odds against DB
