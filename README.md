@@ -1,3 +1,5 @@
+BetLive V3.6 — corrección de menús móviles y caché de frontend
+
 # BetLive — núcleo V3 + panel administrativo
 
 Esta versión conserva la página principal y el login actual, pero amplía el backend y el panel para dejar lista la mayor parte de la arquitectura de la plataforma.
