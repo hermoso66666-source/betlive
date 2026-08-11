@@ -78,6 +78,22 @@ async function dbInit(){
    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),resolved_at TIMESTAMPTZ
  );
  CREATE INDEX IF NOT EXISTS idx_wallet_req_status ON wallet_requests(status,created_at DESC);
+ ALTER TABLE wallet_requests ADD COLUMN IF NOT EXISTS payout_details JSONB NOT NULL DEFAULT '{}'::jsonb;
+ ALTER TABLE wallet_requests ADD COLUMN IF NOT EXISTS admin_note VARCHAR(500) DEFAULT '';
+ CREATE TABLE IF NOT EXISTS wallet_settings(
+   id INTEGER PRIMARY KEY DEFAULT 1,
+   enabled BOOLEAN NOT NULL DEFAULT TRUE,
+   title VARCHAR(120) NOT NULL DEFAULT 'Depósitos por transferencia',
+   instructions TEXT NOT NULL DEFAULT 'Realiza tu transferencia y registra la solicitud.',
+   bank_name VARCHAR(120) DEFAULT '',
+   account_holder VARCHAR(160) DEFAULT '',
+   account_number VARCHAR(80) DEFAULT '',
+   clabe VARCHAR(30) DEFAULT '',
+   card_number VARCHAR(30) DEFAULT '',
+   reference_text VARCHAR(120) DEFAULT '',
+   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ );
+ INSERT INTO wallet_settings(id) VALUES(1) ON CONFLICT (id) DO NOTHING;
  CREATE TABLE IF NOT EXISTS oauth_accounts(
    id UUID PRIMARY KEY,
    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -100,6 +116,49 @@ async function dbInit(){
  `);
  await seedDemoEvents();
 }
+async function ensureMarketTemplates(){
+  const {rows:events}=await pool.query("SELECT e.id,e.sport FROM sports_events e");
+  const templates={
+    "Fútbol":[
+      ["Doble oportunidad","DOUBLE_CHANCE",[["1X","1X",1.28],["X2","X2",1.32],["12","12",1.30]]],
+      ["Más/Menos 2.5 goles","TOTAL_GOALS",[["Más 2.5","OVER",1.85],["Menos 2.5","UNDER",1.85]]],
+      ["Ambos marcan","BOTH_SCORE",[["Sí","YES",1.72],["No","NO",1.92]]],
+      ["Primer equipo en marcar","FIRST_GOAL",[["Local","HOME",1.75],["Ninguno","NONE",8.0],["Visitante","AWAY",2.05]]],
+      ["Total de córners 8.5","TOTAL_CORNERS",[["Más 8.5","OVER",1.80],["Menos 8.5","UNDER",1.90]]],
+      ["Total de tarjetas 4.5","TOTAL_CARDS",[["Más 4.5","OVER",1.85],["Menos 4.5","UNDER",1.85]]]
+    ],
+    "Básquetbol":[
+      ["Handicap","SPREAD",[["Local -4.5","HOME",-1],["Visitante +4.5","AWAY",-1]]],
+      ["Total de puntos 210.5","TOTAL_POINTS",[["Más 210.5","OVER",1.85],["Menos 210.5","UNDER",1.85]]],
+      ["Ganador 1er tiempo","HALF_WINNER",[["Local","HOME",1.75],["Visitante","AWAY",2.05]]]
+    ],
+    "Tenis":[
+      ["Handicap de juegos","GAME_SPREAD",[["Local -2.5","HOME",1.85],["Visitante +2.5","AWAY",1.85]]],
+      ["Total de juegos 22.5","TOTAL_GAMES",[["Más 22.5","OVER",1.85],["Menos 22.5","UNDER",1.85]]],
+      ["Ganador del 1er set","SET_WINNER",[["Local","HOME",1.75],["Visitante","AWAY",2.05]]]
+    ],
+    "Béisbol":[
+      ["Línea de carreras","RUN_LINE",[["Local -1.5","HOME",2.10],["Visitante +1.5","AWAY",1.70]]],
+      ["Total de carreras 8.5","TOTAL_RUNS",[["Más 8.5","OVER",1.85],["Menos 8.5","UNDER",1.85]]],
+      ["Ganador de 1ra entrada","FIRST_INNING",[["Local","HOME",1.90],["Visitante","AWAY",1.90]]]
+    ]
+  };
+  for(const e of events){
+    const templates=templatesFor(e.sport,templates);
+    for(const [name,type,sel] of templates){
+      const exists=await pool.query("SELECT 1 FROM markets WHERE event_id=$1 AND name=$2 LIMIT 1",[e.id,name]);
+      if(exists.rowCount)continue;
+      const mid=crypto.randomUUID();
+      await pool.query("INSERT INTO markets(id,event_id,name,market_type) VALUES($1,$2,$3,$4)",[mid,e.id,name,type]);
+      for(const [label,code,odd] of sel){
+        const value=odd>1?odd:1.85;
+        await pool.query("INSERT INTO market_selections(id,market_id,label,code,odds) VALUES($1,$2,$3,$4,$5)",[crypto.randomUUID(),mid,label,code,value]);
+      }
+    }
+  }
+}
+function templatesFor(sport,all){return all[sport]||[];}
+
 async function seedDemoEvents(){
  const c=await pool.query("SELECT COUNT(*)::int n FROM sports_events");
  if(c.rows[0].n>0)return;
@@ -250,7 +309,7 @@ app.get("/api/auth/google/callback",async(req,res)=>{
 app.get("/api/profile",auth,async(req,res)=>{
   const r=await pool.query(`SELECT id,name,email,phone,balance_cents,role,active,avatar_url,email_verified,provider,created_at FROM users WHERE id=$1`,[req.user.id]);
   const tx=await pool.query(`SELECT id,type,amount_cents,balance_after_cents,reason,created_at FROM balance_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`,[req.user.id]);
-  const wr=await pool.query(`SELECT id,type,amount_cents,status,note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30`,[req.user.id]);
+  const wr=await pool.query(`SELECT id,type,amount_cents,status,note,payout_details,admin_note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30`,[req.user.id]);
   res.json({profile:r.rows[0],transactions:tx.rows,requests:wr.rows});
 });
 app.patch("/api/profile",auth,async(req,res)=>{
@@ -276,11 +335,32 @@ app.post("/api/profile/password",auth,authLimiter,async(req,res)=>{
     res.json({ok:true});
   }catch(e){console.error(e);res.status(500).json({error:"No se pudo cambiar la contraseña"})}
 });
+app.get("/api/wallet/settings",async(req,res)=>{
+  try{const {rows}=await pool.query("SELECT * FROM wallet_settings WHERE id=1");res.json({settings:rows[0]||null})}
+  catch(e){res.status(500).json({error:"No se pudieron cargar los datos de depósito"})}
+});
 app.post("/api/wallet/requests",auth,async(req,res)=>{
   const type=req.body.type,amount=Math.round(Number(req.body.amount)*100);
   if(!["DEPOSIT","WITHDRAWAL"].includes(type)||!Number.isSafeInteger(amount)||amount<=0)return res.status(400).json({error:"Solicitud inválida"});
   if(amount>100000000)return res.status(400).json({error:"Cantidad fuera de rango"});
-  const r=await pool.query("INSERT INTO wallet_requests(id,user_id,type,amount_cents,note) VALUES($1,$2,$3,$4,$5) RETURNING *",[crypto.randomUUID(),req.user.id,type,amount,String(req.body.note||"").slice(0,255)]);
+  const note=String(req.body.note||"").trim().slice(0,255);
+  const raw=req.body.payoutDetails||{};
+  const payout=type==="WITHDRAWAL"?{
+    method:String(raw.method||"").slice(0,40),
+    accountHolder:String(raw.accountHolder||"").trim().slice(0,160),
+    bank:String(raw.bank||"").trim().slice(0,120),
+    accountNumber:String(raw.accountNumber||"").trim().slice(0,80),
+    clabe:String(raw.clabe||"").trim().slice(0,30),
+    phone:String(raw.phone||"").trim().slice(0,30)
+  }:{};
+  if(type==="WITHDRAWAL" && (!payout.method||!payout.accountHolder||(!payout.clabe&&!payout.accountNumber)))
+    return res.status(400).json({error:"Completa los datos de pago para el retiro"});
+  if(type==="WITHDRAWAL"){
+    const u=await pool.query("SELECT balance_cents FROM users WHERE id=$1",[req.user.id]);
+    if(!u.rows[0]||BigInt(u.rows[0].balance_cents)<BigInt(amount))return res.status(400).json({error:"Saldo insuficiente para solicitar ese retiro"});
+  }
+  const r=await pool.query("INSERT INTO wallet_requests(id,user_id,type,amount_cents,note,payout_details) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
+    [crypto.randomUUID(),req.user.id,type,amount,note,JSON.stringify(payout)]);
   res.status(201).json({request:r.rows[0]});
 });
 
@@ -316,7 +396,7 @@ app.post("/api/tickets",auth,ticketLimiter,async(req,res)=>{
 
 // Wallet requests
 app.get("/api/wallet/transactions",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,type,amount_cents,balance_after_cents,reason,created_at FROM balance_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100",[req.user.id]);res.json({transactions:rows})});
-app.get("/api/wallet/requests",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,type,amount_cents,status,note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",[req.user.id]);res.json({requests:rows})});
+app.get("/api/wallet/requests",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,type,amount_cents,status,note,payout_details,admin_note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",[req.user.id]);res.json({requests:rows})});
 app.post("/api/wallet/requests",auth,async(req,res)=>{const type=req.body.type,amount=Math.trunc(Number(req.body.amountCents)),note=String(req.body.note||"").slice(0,255);if(!['DEPOSIT','WITHDRAWAL'].includes(type)||!Number.isSafeInteger(amount)||amount<100)return res.status(400).json({error:"Solicitud inválida"});const {rows}=await pool.query("INSERT INTO wallet_requests(id,user_id,type,amount_cents,note) VALUES($1,$2,$3,$4,$5) RETURNING *",[crypto.randomUUID(),req.user.id,type,amount,note]);res.status(201).json({request:rows[0]})});
 
 // Admin dashboard
@@ -329,11 +409,19 @@ app.get("/api/admin/users/:id",auth,requireAdmin,async(req,res)=>{
     if(!u.rows[0])return res.status(404).json({error:"Usuario no encontrado"});
     const [tx,wr,tickets]=await Promise.all([
       pool.query(`SELECT id,type,amount_cents,balance_after_cents,reason,created_at FROM balance_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`,[req.params.id]),
-      pool.query(`SELECT id,type,amount_cents,status,note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30`,[req.params.id]),
+      pool.query(`SELECT id,type,amount_cents,status,note,payout_details,admin_note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30`,[req.params.id]),
       pool.query(`SELECT id,stake_cents,total_odds,potential_cents,status,created_at,settled_at FROM tickets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30`,[req.params.id])
     ]);
     res.json({user:u.rows[0],transactions:tx.rows,requests:wr.rows,tickets:tickets.rows});
   }catch(e){console.error(e);res.status(500).json({error:"No se pudo cargar el perfil"})}
+});
+app.patch("/api/admin/users/:id",auth,requireAdmin,async(req,res)=>{
+  const name=String(req.body.name||"").trim().slice(0,80),phone=String(req.body.phone||"").trim().slice(0,30);
+  if(!name)return res.status(400).json({error:"El nombre es obligatorio"});
+  const {rows}=await pool.query("UPDATE users SET name=$1,phone=$2,updated_at=NOW() WHERE id=$3 RETURNING id,name,email,phone,balance_cents,role,active,created_at",[name,phone||null,req.params.id]);
+  if(!rows[0])return res.status(404).json({error:"Usuario no encontrado"});
+  await audit(req.user.id,"UPDATE_USER","user",req.params.id,{name,phone});
+  res.json({user:rows[0]});
 });
 app.patch("/api/admin/users/:id/status",auth,requireAdmin,async(req,res)=>{const active=Boolean(req.body.active);if(req.params.id===req.user.id&&!active)return res.status(400).json({error:"No puedes bloquear tu propia cuenta"});const {rows}=await pool.query("UPDATE users SET active=$1 WHERE id=$2 RETURNING id,name,email,phone,balance_cents,role,active,created_at",[active,req.params.id]);if(!rows[0])return res.status(404).json({error:"Usuario no encontrado"});await audit(req.user.id,active?"ACTIVATE_USER":"BLOCK_USER","user",req.params.id);res.json({user:rows[0]})});
 app.post("/api/admin/users/:id/balance",auth,requireAdmin,async(req,res)=>{const amount=Math.trunc(Number(req.body.amountCents)),reason=String(req.body.reason||"").trim().slice(0,255);if(!Number.isSafeInteger(amount)||amount===0||!reason)return res.status(400).json({error:"Monto o motivo inválido"});const client=await pool.connect();try{await client.query("BEGIN");const u=await client.query("SELECT balance_cents FROM users WHERE id=$1 FOR UPDATE",[req.params.id]);if(!u.rows[0])throw new Error("Usuario no encontrado");const next=BigInt(u.rows[0].balance_cents)+BigInt(amount);if(next<0n)throw new Error("El saldo no puede quedar negativo");await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next.toString(),req.params.id]);await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,type,amount_cents,balance_after_cents,reason) VALUES($1,$2,$3,'ADMIN_ADJUSTMENT',$4,$5,$6)",[crypto.randomUUID(),req.params.id,req.user.id,amount,next.toString(),reason]);await client.query("COMMIT");await audit(req.user.id,"BALANCE_ADJUSTMENT","user",req.params.id,{amount,reason});res.json({ok:true,balance_cents:next.toString()})}catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}});
@@ -343,7 +431,7 @@ app.post("/api/admin/tickets/:id/settle",auth,requireAdmin,async(req,res)=>{cons
 
 // Admin events / markets
 app.get("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,COUNT(ms.id)::int selections_count FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id LEFT JOIN market_selections ms ON ms.market_id=m.id GROUP BY e.id ORDER BY e.starts_at DESC LIMIT 300`);res.json({events:rows})});
-app.post("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {sport,league,homeTeam,awayTeam,startsAt,featured=false,video=false}=req.body;if(!sport||!league||!homeTeam||!awayTeam||!startsAt)return res.status(400).json({error:"Completa el evento"});const id=crypto.randomUUID();const {rows}=await pool.query("INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,featured,video) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",[id,String(sport).slice(0,40),String(league).slice(0,100),String(homeTeam).slice(0,100),String(awayTeam).slice(0,100),startsAt,Boolean(featured),Boolean(video)]);await audit(req.user.id,"CREATE_EVENT","event",id);res.status(201).json({event:rows[0]})});
+app.post("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {sport,league,homeTeam,awayTeam,startsAt,featured=false,video=false}=req.body;if(!sport||!league||!homeTeam||!awayTeam||!startsAt)return res.status(400).json({error:"Completa el evento"});const id=crypto.randomUUID();const {rows}=await pool.query("INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,featured,video) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",[id,String(sport).slice(0,40),String(league).slice(0,100),String(homeTeam).slice(0,100),String(awayTeam).slice(0,100),startsAt,Boolean(featured),Boolean(video)]);await ensureMarketTemplates();await audit(req.user.id,"CREATE_EVENT","event",id);res.status(201).json({event:rows[0]})});
 app.patch("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{const fields=[],vals=[];const map={sport:"sport",league:"league",homeTeam:"home_team",awayTeam:"away_team",startsAt:"starts_at",status:"status",homeScore:"home_score",awayScore:"away_score",featured:"featured",video:"video"};for(const [k,col] of Object.entries(map))if(req.body[k]!==undefined){fields.push(`${col}=$${vals.length+1}`);vals.push(req.body[k])}if(!fields.length)return res.status(400).json({error:"Sin cambios"});vals.push(req.params.id);const {rows}=await pool.query(`UPDATE sports_events SET ${fields.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:"Evento no encontrado"});await audit(req.user.id,"UPDATE_EVENT","event",req.params.id,req.body);res.json({event:rows[0]})});
 app.delete("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{await pool.query("DELETE FROM sports_events WHERE id=$1",[req.params.id]);await audit(req.user.id,"DELETE_EVENT","event",req.params.id);res.json({ok:true})});
 app.get("/api/admin/events/:id/markets",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT m.id,m.name,m.market_type,m.status,jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) selections FROM markets m LEFT JOIN market_selections s ON s.market_id=m.id WHERE m.event_id=$1 GROUP BY m.id ORDER BY m.created_at`,[req.params.id]);res.json({markets:rows})});
@@ -356,8 +444,62 @@ app.post("/api/admin/quinielas",auth,requireAdmin,async(req,res)=>{const {name,k
 app.patch("/api/admin/quinielas/:id",auth,requireAdmin,async(req,res)=>{const map={name:"name",kind:"kind",priceCents:"price_cents",description:"description",active:"active",closeAt:"close_at",prizeText:"prize_text"};const f=[],v=[];for(const[k,c]of Object.entries(map))if(req.body[k]!==undefined){f.push(`${c}=$${v.length+1}`);v.push(k==='priceCents'?Math.trunc(Number(req.body[k])):req.body[k])}if(!f.length)return res.status(400).json({error:"Sin cambios"});v.push(req.params.id);const {rows}=await pool.query(`UPDATE quinielas SET ${f.join(',')} WHERE id=$${v.length} RETURNING *`,v);if(!rows[0])return res.status(404).json({error:"Quiniela no encontrada"});await audit(req.user.id,"UPDATE_QUINIELA","quiniela",req.params.id,req.body);res.json({quiniela:rows[0]})});
 
 // Admin wallet requests
-app.get("/api/admin/wallet-requests",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT r.*,u.name user_name,u.email user_email FROM wallet_requests r JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 300`);res.json({requests:rows})});
-app.post("/api/admin/wallet-requests/:id/resolve",auth,requireAdmin,async(req,res)=>{const status=String(req.body.status||"").toUpperCase();if(!['APPROVED','REJECTED'].includes(status))return res.status(400).json({error:"Estado inválido"});const client=await pool.connect();try{await client.query("BEGIN");const r=await client.query("SELECT * FROM wallet_requests WHERE id=$1 FOR UPDATE",[req.params.id]);if(!r.rows[0])throw new Error("Solicitud no encontrada");if(r.rows[0].status!=="PENDING")throw new Error("La solicitud ya fue resuelta");const x=r.rows[0];if(status==='APPROVED'){const u=await client.query("SELECT balance_cents FROM users WHERE id=$1 FOR UPDATE",[x.user_id]);let next=BigInt(u.rows[0].balance_cents);if(x.type==='DEPOSIT')next+=BigInt(x.amount_cents);else{if(next<BigInt(x.amount_cents))throw new Error("Saldo insuficiente para el retiro");next-=BigInt(x.amount_cents)}await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next.toString(),x.user_id]);await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,type,amount_cents,balance_after_cents,reason,reference_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[crypto.randomUUID(),x.user_id,req.user.id,x.type,x.type==='DEPOSIT'?x.amount_cents:-x.amount_cents,next.toString(),`Solicitud ${x.type} aprobada`,x.id])}await client.query("UPDATE wallet_requests SET status=$1,admin_id=$2,resolved_at=NOW() WHERE id=$3",[status,req.user.id,x.id]);await client.query("COMMIT");await audit(req.user.id,"RESOLVE_WALLET_REQUEST","wallet_request",x.id,{status});res.json({ok:true,status})}catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}});
+app.get("/api/admin/wallet-settings",auth,requireAdmin,async(req,res)=>{
+  const {rows}=await pool.query("SELECT * FROM wallet_settings WHERE id=1");
+  res.json({settings:rows[0]||null});
+});
+app.patch("/api/admin/wallet-settings",auth,requireAdmin,async(req,res)=>{
+  const fields=["enabled","title","instructions","bank_name","account_holder","account_number","clabe","card_number","reference_text"];
+  const vals=[]; const sets=[];
+  for(const f of fields) if(req.body[f]!==undefined){sets.push(`${f}=$${vals.length+1}`);vals.push(f==="enabled"?Boolean(req.body[f]):String(req.body[f]||"").slice(0,500))}
+  if(!sets.length)return res.status(400).json({error:"Sin cambios"});
+  sets.push("updated_at=NOW()");vals.push(1);
+  const {rows}=await pool.query(`UPDATE wallet_settings SET ${sets.join(",")} WHERE id=$${vals.length} RETURNING *`,vals);
+  await audit(req.user.id,"UPDATE_WALLET_SETTINGS","wallet_settings","00000000-0000-0000-0000-000000000001",req.body);
+  res.json({settings:rows[0]});
+});
+app.get("/api/admin/wallet-requests",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT r.*,u.name user_name,u.email user_email,u.phone user_phone FROM wallet_requests r JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 300`);res.json({requests:rows})});
+app.post("/api/admin/wallet-requests/:id/resolve",auth,requireAdmin,async(req,res)=>{
+  const status=String(req.body.status||"").toUpperCase();
+  if(!['APPROVED','REJECTED'].includes(status))return res.status(400).json({error:"Estado inválido"});
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const r=await client.query("SELECT * FROM wallet_requests WHERE id=$1 FOR UPDATE",[req.params.id]);
+    if(!r.rows[0])throw new Error("Solicitud no encontrada");
+    const x=r.rows[0];
+    if(x.status!=="PENDING")throw new Error("La solicitud ya fue procesada");
+    if(status==="APPROVED" && x.type==="DEPOSIT"){
+      const u=await client.query("SELECT balance_cents FROM users WHERE id=$1 FOR UPDATE",[x.user_id]);
+      const next=(BigInt(u.rows[0].balance_cents)+BigInt(x.amount_cents)).toString();
+      await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next,x.user_id]);
+      await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,type,amount_cents,balance_after_cents,reason,reference_id) VALUES($1,$2,$3,'DEPOSIT',$4,$5,$6,$7)",[crypto.randomUUID(),x.user_id,req.user.id,x.amount_cents,next,"Depósito manual aprobado",x.id]);
+    }
+    await client.query("UPDATE wallet_requests SET status=$1,admin_id=$2,resolved_at=NOW() WHERE id=$3",[status,req.user.id,x.id]);
+    await client.query("COMMIT");
+    await audit(req.user.id,"RESOLVE_WALLET_REQUEST","wallet_request",x.id,{status});
+    res.json({ok:true,status});
+  }catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}
+});
+app.post("/api/admin/wallet-requests/:id/paid",auth,requireAdmin,async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const r=await client.query("SELECT * FROM wallet_requests WHERE id=$1 FOR UPDATE",[req.params.id]);
+    if(!r.rows[0])throw new Error("Solicitud no encontrada");
+    const x=r.rows[0];
+    if(x.type!=="WITHDRAWAL"||x.status!=="APPROVED")throw new Error("El retiro debe estar autorizado antes de marcarlo como pagado");
+    const u=await client.query("SELECT balance_cents FROM users WHERE id=$1 FOR UPDATE",[x.user_id]);
+    if(BigInt(u.rows[0].balance_cents)<BigInt(x.amount_cents))throw new Error("Saldo insuficiente para completar el retiro");
+    const next=(BigInt(u.rows[0].balance_cents)-BigInt(x.amount_cents)).toString();
+    await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next,x.user_id]);
+    await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,type,amount_cents,balance_after_cents,reason,reference_id) VALUES($1,$2,$3,'WITHDRAWAL',$4,$5,$6,$7)",[crypto.randomUUID(),x.user_id,req.user.id,-x.amount_cents,next,"Retiro pagado manualmente",x.id]);
+    await client.query("UPDATE wallet_requests SET status='PAID',admin_id=$1,resolved_at=NOW() WHERE id=$2",[req.user.id,x.id]);
+    await client.query("COMMIT");
+    await audit(req.user.id,"PAY_WITHDRAWAL","wallet_request",x.id,{amount_cents:x.amount_cents});
+    res.json({ok:true,status:"PAID"});
+  }catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}
+});
 
 app.get("/api/admin/audit",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT a.id,a.action,a.target_type,a.target_id,a.details,a.created_at,COALESCE(u.name,'Sistema') admin_name FROM admin_audit a LEFT JOIN users u ON u.id=a.admin_id ORDER BY a.created_at DESC LIMIT 300`);res.json({audit:rows})});
 

@@ -1,7 +1,7 @@
 let M=[],sport="Todos",filter="all",slip=[],type="single",quick=null,quickMode=false,user=null;
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s),money=c=>"$"+(Number(c)/100).toLocaleString("es-MX",{minimumFractionDigits:2}),toast=t=>{let x=$("#toast");x.textContent=t;x.classList.add("show");setTimeout(()=>x.classList.remove("show"),1800)};
 async function api(url,opt={}){let r=await fetch(url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opt.headers||{})},...opt});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||"Error");return d}
-function normalizeEvents(events){return events.map(e=>{const m=e.markets?.[0],ss=m?.selections||[];return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,marketId:m?.marketId,marketName:m?.name,odds:ss.map(s=>({id:s.id,label:s.label,code:s.code,odd:Number(s.odds),status:s.status}))}})}
+function normalizeEvents(events){return events.map(e=>{const markets=e.markets||[];const odds=markets.flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})));return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,odds}})}
 async function loadEvents(){try{const d=await api("/api/events");M=normalizeEvents(d.events);render()}catch(e){toast(e.message)}}
 async function loadMe(){try{let d=await api("/api/me");user=d.user;$("#balance").textContent=money(user.balance_cents);$("#account").textContent=(user.name||"U")[0].toUpperCase()}catch{user=null;$("#balance").textContent="$0.00"}}
 async function loadTickets(){if(!user){$("#history").innerHTML="<div class=empty>Inicia sesión para ver tus tickets.</div>";return}try{let d=await api("/api/tickets");$("#history").innerHTML=d.tickets.length?d.tickets.map(t=>`<div class=slip-item><b>${money(t.stake_cents)} · Cuota ${Number(t.total_odds).toFixed(2)} · ${t.status}</b><small>${new Date(t.created_at).toLocaleString("es-MX")} · Potencial ${money(t.potential_cents)}</small></div>`).join(""):"<div class=empty>No hay tickets.</div>"}catch(e){toast(e.message)}}
@@ -52,15 +52,25 @@ $("#saveProfile").onclick=async()=>{
 };
 $("#logout").onclick=async()=>{try{await api("/api/auth/logout",{method:"POST"});user=null;$("#profileModal").classList.add("hidden");await loadMe();renderSlip();toast("Sesión cerrada")}catch(e){toast(e.message)}};
 let walletType="DEPOSIT";
-function openWallet(type){walletType=type;$("#walletTitle").textContent=type==="DEPOSIT"?"Solicitar depósito":"Solicitar retiro";$("#walletAmount").value="";$("#walletNote").value="";$("#walletModal").classList.remove("hidden")}
+async function loadWalletSettings(){try{const d=await api("/api/wallet/settings");const s=d.settings;$("#depositInstructions").innerHTML=s?`<b>${s.title||"Datos para depósito"}</b><p>${s.instructions||""}</p>${s.bank_name?`<div><b>Banco:</b> ${s.bank_name}</div>`:""}${s.account_holder?`<div><b>Titular:</b> ${s.account_holder}</div>`:""}${s.account_number?`<div><b>Cuenta:</b> ${s.account_number}</div>`:""}${s.clabe?`<div><b>CLABE:</b> ${s.clabe}</div>`:""}${s.card_number?`<div><b>Tarjeta:</b> ${s.card_number}</div>`:""}${s.reference_text?`<div><b>Referencia:</b> ${s.reference_text}</div>`:""}`:"Sin datos de depósito configurados."}catch(e){$("#depositInstructions").textContent="No se pudieron cargar las instrucciones."}}
+function openWallet(type){
+  if(!user)return openAuth();
+  walletType=type;$("#walletTitle").textContent=type==="DEPOSIT"?"Solicitar depósito":"Solicitar retiro";
+  $("#walletAmount").value="";$("#walletNote").value="";
+  $("#withdrawFields").classList.toggle("hidden",type!=="WITHDRAWAL");
+  $("#depositInstructions").classList.toggle("hidden",type!=="DEPOSIT");
+  if(type==="DEPOSIT")loadWalletSettings();
+  $("#walletModal").classList.remove("hidden");
+}
 $("#depositBtn").onclick=()=>openWallet("DEPOSIT");$("#withdrawBtn").onclick=()=>openWallet("WITHDRAWAL");
 $("#closeWallet").onclick=()=>$("#walletModal").classList.add("hidden");
 $("#walletSubmit").onclick=async()=>{
   try{
     const amount=Number($("#walletAmount").value);
     if(!Number.isFinite(amount)||amount<=0)return toast("Cantidad inválida");
-    await api("/api/wallet/requests",{method:"POST",body:JSON.stringify({type:walletType,amount,note:$("#walletNote").value})});
-    $("#walletModal").classList.add("hidden");await loadProfile();toast("Solicitud enviada ✓");
+    const payoutDetails=walletType==="WITHDRAWAL"?{method:$("#withdrawMethod").value,accountHolder:$("#withdrawHolder").value,bank:$("#withdrawBank").value,accountNumber:$("#withdrawAccount").value,clabe:$("#withdrawClabe").value,phone:$("#withdrawPhone").value}:{};
+    await api("/api/wallet/requests",{method:"POST",body:JSON.stringify({type:walletType,amount,note:$("#walletNote").value,payoutDetails})});
+    $("#walletModal").classList.add("hidden");await loadProfile();await loadMe();toast("Solicitud enviada ✓");
   }catch(e){toast(e.message)}
 };
 $("#changePasswordBtn").onclick=()=>$("#passwordModal").classList.remove("hidden");

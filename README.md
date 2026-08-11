@@ -82,3 +82,14 @@ Configura en Render:
 Redirect URIs:
 - Google: `https://TU-DOMINIO/api/auth/google/callback`
 
+
+
+## V3.3 — Administración, depósitos manuales y mercados
+- Panel Admin con perfil de jugador, edición de datos y ajuste de saldo con auditoría.
+- Depósitos manuales: el administrador puede configurar banco, titular, cuenta, CLABE, tarjeta, referencia e instrucciones desde Admin.
+- Retiros: el jugador registra método, titular, banco, cuenta/CLABE y teléfono; Admin recibe esos datos para validar.
+- Retiro en dos pasos: Autorizar y después Marcar pagado. El saldo se descuenta al marcar el pago como realizado.
+- Depósitos aprobados acreditan el saldo y generan movimiento.
+- Mercados de apuestas adicionales por deporte: doble oportunidad, totales, ambos marcan, primer gol, córners, tarjetas, handicap/spread, totales de puntos/juegos/carreras y otros mercados base.
+- El jugador visualiza las selecciones de todos los mercados disponibles del evento.
+- Facebook permanece eliminado; Google OAuth se conserva.

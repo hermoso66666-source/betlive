@@ -36,7 +36,16 @@
   <div class="auth">
     <button id="closeWallet">×</button><b class="logo big">BET<span>LIVE</span></b>
     <h2 id="walletTitle">Solicitud</h2>
+    <div id="depositInstructions" class="wallet-info hidden"></div>
     <input id="walletAmount" type="number" min="1" step="0.01" placeholder="Cantidad en MXN">
+    <div id="withdrawFields" class="hidden">
+      <select id="withdrawMethod"><option value="">Método de pago</option><option>Transferencia SPEI</option><option>Transferencia bancaria</option><option>Depósito en cuenta</option></select>
+      <input id="withdrawHolder" placeholder="Nombre del titular">
+      <input id="withdrawBank" placeholder="Banco">
+      <input id="withdrawAccount" placeholder="Número de cuenta (opcional si usas CLABE)">
+      <input id="withdrawClabe" placeholder="CLABE interbancaria">
+      <input id="withdrawPhone" placeholder="Teléfono de contacto">
+    </div>
     <input id="walletNote" placeholder="Nota (opcional)">
     <button id="walletSubmit" class="red">Enviar solicitud</button>
   </div>

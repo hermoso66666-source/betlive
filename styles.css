@@ -7,3 +7,5 @@
 .profile-balance{padding:14px;border-radius:12px;background:#151515;margin:10px 0}.profile-balance b{display:block;font-size:22px;margin-top:4px}
 .profile-actions,.wallet-buttons{display:flex;gap:8px}.wallet-buttons>*{flex:1}.profile-list{margin-top:10px;max-height:180px;overflow:auto}.profile-row{padding:9px 0;border-bottom:1px solid #2a2a2a;font-size:13px}.profile-row small{display:block;opacity:.7;margin-top:3px}
 #profileModal input[disabled]{opacity:.65}.hidden{display:none!important}
+
+.wallet-info{padding:12px;margin:8px 0;border:1px solid #303038;border-radius:10px;line-height:1.5;font-size:.9rem}.wallet-info p{margin:6px 0}.auth select{width:100%;padding:12px;margin:5px 0;background:#0d0d10;color:#fff;border:1px solid #333;border-radius:8px}.auth input{box-sizing:border-box}
