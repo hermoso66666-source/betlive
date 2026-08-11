@@ -129,6 +129,27 @@ app.post("/api/tickets",auth,ticketLimiter,async(req,res)=>{
  finally{client.release()}
 });
 
+async function ensureBootstrapAdmin(){
+  const email=cleanEmail(process.env.ADMIN_EMAIL);
+  const password=process.env.ADMIN_PASSWORD;
+  const name=(process.env.ADMIN_NAME||"Administrador").trim().slice(0,80)||"Administrador";
+  if(!email || !password){
+    console.warn("ADMIN_EMAIL/ADMIN_PASSWORD no configurados; no se creó administrador inicial");
+    return;
+  }
+  if(!validatePassword(password)) throw new Error("ADMIN_PASSWORD debe tener entre 8 y 128 caracteres");
+  const hash=await bcrypt.hash(password,12);
+  const existing=await pool.query("SELECT id FROM users WHERE email=$1 LIMIT 1",[email]);
+  if(existing.rows[0]){
+    await pool.query("UPDATE users SET role='admin', active=TRUE, name=$1, password_hash=$2 WHERE id=$3",[name,hash,existing.rows[0].id]);
+    console.log("Administrador existente actualizado: "+email);
+  }else{
+    const id=crypto.randomUUID();
+    await pool.query("INSERT INTO users(id,name,email,password_hash,role,active) VALUES($1,$2,$3,$4,'admin',TRUE)",[id,name,email,hash]);
+    console.log("Administrador inicial creado: "+email);
+  }
+}
+
 function requireAdmin(req,res,next){
  if(!req.user||req.user.role!=="admin") return res.status(403).json({error:"Acceso de administrador requerido"});
  next();
@@ -191,6 +212,9 @@ app.get("/api/admin/tickets",auth,requireAdmin,async(req,res)=>{
   res.json({tickets:rows});
  }catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los tickets"})}
 });
+
+app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
+app.get("/admin/",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 
 app.use(express.static(path.join(__dirname,".")));
 app.get("/{*splat}",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
