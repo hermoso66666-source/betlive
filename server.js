@@ -25,7 +25,7 @@ const PORT=process.env.PORT||10000;
 const API_FOOTBALL_KEY=process.env.API_FOOTBALL_KEY||"";
 const API_FOOTBALL_BASE=(process.env.API_FOOTBALL_BASE_URL||"https://v3.football.api-sports.io").replace(/\/$/,"");
 const LIVE_SYNC_ENABLED=String(process.env.LIVE_SYNC_ENABLED??"true").toLowerCase()!=="false";
-const LIVE_SYNC_INTERVAL_MS=Math.max(300000,Number(process.env.LIVE_SYNC_INTERVAL_MS||2700000));
+const LIVE_SYNC_INTERVAL_MS=Math.max(600000,Number(process.env.LIVE_SYNC_INTERVAL_MS||3600000));
 const authLimiter=rateLimit({windowMs:15*60*1000,max:40,standardHeaders:true,legacyHeaders:false});
 const ticketLimiter=rateLimit({windowMs:60*1000,max:20,standardHeaders:true,legacyHeaders:false});
 
@@ -391,30 +391,74 @@ app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 
 // Public catalog
 app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') AND (COALESCE($1::boolean,FALSE)=FALSE OR (e.external_source='API_FOOTBALL' AND e.status='LIVE')) GROUP BY e.id ORDER BY e.starts_at LIMIT 200`,[req.query.live === "true"]);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
-const upcomingLimiter=rateLimit({windowMs:10*60*1000,max:1,standardHeaders:true,legacyHeaders:false});
+const upcomingLimiter=rateLimit({windowMs:3*60*60*1000,max:1,standardHeaders:true,legacyHeaders:false});
+async function upsertUpcomingFixtures(fixtures){
+  let count=0;
+  for(const f of fixtures){
+    const fid=String(f?.fixture?.id||""); if(!fid) continue;
+    const status=apiFixtureStatus(f);
+    if(status!=="OPEN") continue;
+    const leagueName=f.league?.name||`Liga ${f.league?.id||""}`;
+    const home=f.teams?.home?.name||`Local ${f.teams?.home?.id||""}`;
+    const away=f.teams?.away?.name||`Visitante ${f.teams?.away?.id||""}`;
+    const starts=f.fixture?.date||new Date().toISOString();
+    await pool.query(`
+      INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,featured,video,external_source,external_id,last_synced_at)
+      VALUES($1,'Fútbol',$2,$3,$4,$5,'OPEN',0,0,FALSE,FALSE,'API_FOOTBALL',$6,NOW())
+      ON CONFLICT (external_source,external_id) WHERE external_id IS NOT NULL
+      DO UPDATE SET league=EXCLUDED.league,home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,starts_at=EXCLUDED.starts_at,status=CASE WHEN sports_events.status='LIVE' THEN 'LIVE' ELSE 'OPEN' END,last_synced_at=NOW()
+    `,[deterministicUuid(`event:${fid}`),leagueName,home,away,starts,fid]);
+    count++;
+  }
+  return count;
+}
+async function syncUpcomingOdds(days=3){
+  const now=new Date();
+  const fixturesData=await apiFootballGet(`/fixtures?from=${now.toISOString().slice(0,10)}&to=${new Date(now.getTime()+days*86400000).toISOString().slice(0,10)}&timezone=America/Mexico_City`);
+  const fixtures=Array.isArray(fixturesData.response)?fixturesData.response:[];
+  await upsertUpcomingFixtures(fixtures);
+  const dateSet=[...new Set(fixtures.filter(f=>apiFixtureStatus(f)==='OPEN'&&f?.fixture?.date).map(f=>String(f.fixture.date).slice(0,10)))];
+  let oddsRows=0,markets=0,selections=0;
+  for(const date of dateSet){
+    let rows=[];
+    for(let page=1;page<=3;page++){
+      const oddsData=await apiFootballGet(`/odds?date=${date}&timezone=America/Mexico_City&page=${page}`);
+      const pageRows=Array.isArray(oddsData.response)?oddsData.response:[];
+      rows.push(...pageRows);
+      if(!oddsData?.paging?.total || page>=Number(oddsData.paging.total)) break;
+    }
+    oddsRows+=rows.length;
+    for(const row of rows){
+      const fid=String(row?.fixture?.id||""); if(!fid) continue;
+      const eventQ=await pool.query("SELECT id FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=$1 LIMIT 1",[fid]);
+      if(!eventQ.rows[0]) continue;
+      const bookmaker=Array.isArray(row.bookmakers)?row.bookmakers[0]:null;
+      const bets=Array.isArray(bookmaker?.bets)?bookmaker.bets:[];
+      for(const bet of bets){
+        const betId=String(bet?.id||""); if(!betId) continue;
+        const marketKey=`api-football:prematch:${fid}:${betId}`;
+        const marketId=deterministicUuid(marketKey);
+        await pool.query(`INSERT INTO markets(id,event_id,name,market_type,status,external_key) VALUES($1,$2,$3,$4,'OPEN',$5) ON CONFLICT (external_key) WHERE external_key IS NOT NULL DO UPDATE SET name=EXCLUDED.name,event_id=EXCLUDED.event_id,status='OPEN'`,[marketId,eventQ.rows[0].id,cleanMarketName(bet.name),`API_PRE_${betId}`,marketKey]);
+        markets++;
+        const seen=[];
+        for(const v of (Array.isArray(bet.values)?bet.values:[])){
+          const value=String(v?.value??'').trim(), odd=Number(v?.odd);
+          if(!value||!Number.isFinite(odd)||odd<=1) continue;
+          const key=`api-football:prematch:${fid}:${betId}:${value}`; seen.push(key);
+          const sid=deterministicUuid(key);
+          await pool.query(`INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key) VALUES($1,$2,$3,$4,$5,'OPEN',$6) ON CONFLICT (external_key) WHERE external_key IS NOT NULL DO UPDATE SET market_id=EXCLUDED.market_id,label=EXCLUDED.label,code=EXCLUDED.code,odds=EXCLUDED.odds,status='OPEN'`,[sid,marketId,value,`API:${betId}:${value}`.slice(0,30),odd,key]);
+          selections++;
+        }
+        if(seen.length) await pool.query("UPDATE market_selections SET status='CLOSED' WHERE market_id=$1 AND external_key IS NOT NULL AND NOT (external_key = ANY($2::text[]))",[marketId,seen]);
+      }
+    }
+  }
+  return {fixtures:fixtures.length,odds:oddsRows,markets,selections,dates:dateSet};
+}
 app.get("/api/events/upcoming-real",upcomingLimiter,async(req,res)=>{
   try{
     if(!API_FOOTBALL_KEY) return res.status(503).json({error:"API-Football no configurada"});
-    const data=await apiFootballGet("/fixtures?next=20");
-    const fixtures=Array.isArray(data.response)?data.response:[];
-    for(const f of fixtures){
-      const fid=String(f?.fixture?.id||""); if(!fid) continue;
-      const status=apiFixtureStatus(f);
-      if(status!=="OPEN") continue;
-      const leagueName=f.league?.name||`Liga ${f.league?.id||""}`;
-      const home=f.teams?.home?.name||`Local ${f.teams?.home?.id||""}`;
-      const away=f.teams?.away?.name||`Visitante ${f.teams?.away?.id||""}`;
-      const starts=f.fixture?.date||new Date().toISOString();
-      await pool.query(`
-        INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,featured,video,external_source,external_id,last_synced_at)
-        VALUES($1,'Fútbol',$2,$3,$4,$5,'OPEN',0,0,FALSE,FALSE,'API_FOOTBALL',$6,NOW())
-        ON CONFLICT (external_source,external_id) WHERE external_id IS NOT NULL
-        DO UPDATE SET league=EXCLUDED.league,home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,starts_at=EXCLUDED.starts_at,status=CASE WHEN sports_events.status='LIVE' THEN 'LIVE' ELSE 'OPEN' END,last_synced_at=NOW()
-      `,[deterministicUuid(`event:${fid}`),leagueName,home,away,starts,fid]);
-    }
-    let oddsSync={requests:0,rows:0,markets:0,selections:0};
-    try{ oddsSync=await syncPrematchOdds(fixtures.filter(f=>apiFixtureStatus(f)==="OPEN")); }
-    catch(e){ console.warn("prematch odds sync:",e.message); }
+    const sync=await syncUpcomingOdds(3);
     const {rows}=await pool.query(`
       SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,
       COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets
@@ -422,7 +466,7 @@ app.get("/api/events/upcoming-real",upcomingLimiter,async(req,res)=>{
       WHERE e.external_source='API_FOOTBALL' AND e.status='OPEN' AND e.starts_at>=NOW()
       GROUP BY e.id ORDER BY e.starts_at LIMIT 50
     `);
-    res.json({events:rows,source:"API_FOOTBALL",fetched:fixtures.length,oddsSync});
+    res.json({events:rows,source:"API_FOOTBALL",sync});
   }catch(e){console.error("upcoming-real",e);res.status(502).json({error:e.message||"No se pudieron cargar partidos reales"})}
 });
 
@@ -606,19 +650,9 @@ function deterministicUuid(value){
   const hex=h.subarray(0,16).toString("hex");
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
 }
-let apiFootballQuota={dailyLimit:null,dailyRemaining:null,perMinuteLimit:null,perMinuteRemaining:null,lastRequestAt:null,lastEndpoint:null};
-
 async function apiFootballGet(pathname){
   if(!API_FOOTBALL_KEY) throw new Error("API_FOOTBALL_KEY no configurada");
   const r=await fetch(`${API_FOOTBALL_BASE}${pathname}`,{headers:{"x-apisports-key":API_FOOTBALL_KEY,"Accept":"application/json"}});
-  apiFootballQuota={
-    dailyLimit:r.headers.get("x-ratelimit-requests-limit"),
-    dailyRemaining:r.headers.get("x-ratelimit-requests-remaining"),
-    perMinuteLimit:r.headers.get("X-RateLimit-Limit"),
-    perMinuteRemaining:r.headers.get("X-RateLimit-Remaining"),
-    lastRequestAt:new Date().toISOString(),
-    lastEndpoint:pathname
-  };
   const d=await r.json().catch(()=>({}));
   if(!r.ok || (Array.isArray(d.errors)&&d.errors.length)) {
     const msg=Array.isArray(d.errors)?d.errors.join("; "):`HTTP ${r.status}`;
@@ -644,73 +678,6 @@ function cleanMarketName(name){
 }
 function liveSelectionKey(fixtureId,betId,value){
   return `api-football:live:${fixtureId}:${betId}:${String(value)}`.slice(0,240);
-}
-function prematchSelectionKey(fixtureId,betId,value){
-  return `api-football:prematch:${fixtureId}:${betId}:${String(value)}`.slice(0,240);
-}
-
-async function syncPrematchOdds(fixtures){
-  if(!API_FOOTBALL_KEY || !Array.isArray(fixtures) || !fixtures.length) return {requests:0,rows:0,markets:0,selections:0};
-  const ids=new Set(fixtures.map(f=>String(f?.fixture?.id||"")).filter(Boolean));
-  const dates=[...new Set(fixtures.map(f=>String(f?.fixture?.date||"").slice(0,10)).filter(Boolean))].slice(0,3);
-  let requests=0,rowsCount=0,marketCount=0,selectionCount=0;
-  // Odds are paginated at 10 results. Two pages per date are enough for the small
-  // "next 20" player view while keeping the free-plan test usage controlled.
-  for(const date of dates){
-    for(let page=1;page<=2;page++){
-      const data=await apiFootballGet(`/odds?date=${encodeURIComponent(date)}&page=${page}`);
-      requests++;
-      const rows=Array.isArray(data.response)?data.response:[];
-      if(!rows.length) break;
-      for(const row of rows){
-        const fid=String(row?.fixture?.id||"");
-        if(!ids.has(fid)) continue;
-        rowsCount++;
-        const eventQ=await pool.query("SELECT id FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=$1 LIMIT 1",[fid]);
-        if(!eventQ.rows[0]) continue;
-        const eventId=eventQ.rows[0].id;
-        const bookmaker=Array.isArray(row.bookmakers)?row.bookmakers[0]:null;
-        const bets=Array.isArray(bookmaker?.bets)?bookmaker.bets:[];
-        for(const bet of bets){
-          const betId=String(bet?.id||"");
-          if(!betId) continue;
-          const marketKey=`api-football:prematch:market:${fid}:${betId}`;
-          const marketId=deterministicUuid(marketKey);
-          await pool.query(`
-            INSERT INTO markets(id,event_id,name,market_type,status,external_key)
-            VALUES($1,$2,$3,$4,'OPEN',$5)
-            ON CONFLICT (external_key) WHERE external_key IS NOT NULL
-            DO UPDATE SET name=EXCLUDED.name,event_id=EXCLUDED.event_id,status='OPEN'
-          `,[marketId,eventId,cleanMarketName(bet.name),`API_PREMATCH_${betId}`,marketKey]);
-          marketCount++;
-          const values=Array.isArray(bet.values)?bet.values:[];
-          const seen=new Set();
-          for(const v of values){
-            const rawValue=String(v?.value??"").trim();
-            const odd=Number(v?.odd);
-            if(!rawValue||!Number.isFinite(odd)||odd<=1) continue;
-            const key=prematchSelectionKey(fid,betId,rawValue);
-            if(seen.has(key)) continue;
-            seen.add(key);
-            const sid=deterministicUuid(key);
-            const open=v?.suspended!==true;
-            await pool.query(`
-              INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key)
-              VALUES($1,$2,$3,$4,$5,$6,$7)
-              ON CONFLICT (external_key) WHERE external_key IS NOT NULL
-              DO UPDATE SET market_id=EXCLUDED.market_id,label=EXCLUDED.label,code=EXCLUDED.code,odds=EXCLUDED.odds,status=EXCLUDED.status
-            `,[sid,marketId,rawValue.slice(0,100),`API:${betId}:${rawValue}`.slice(0,30),odd,open?"OPEN":"CLOSED",key]);
-            selectionCount++;
-          }
-          if(seen.size){
-            await pool.query("UPDATE market_selections SET status='CLOSED' WHERE market_id=$1 AND external_key IS NOT NULL AND NOT (external_key = ANY($2::text[]))",[marketId,[...seen]]);
-          }
-        }
-      }
-      if(rows.length<10) break;
-    }
-  }
-  return {requests,rows:rowsCount,markets:marketCount,selections:selectionCount};
 }
 let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,error:null,configured:Boolean(API_FOOTBALL_KEY)};
 
@@ -798,7 +765,7 @@ async function syncApiFootballLive(){
   }else{
     await pool.query("UPDATE sports_events SET status='CLOSED',last_synced_at=NOW() WHERE external_source='API_FOOTBALL' AND external_id IS NOT NULL");
   }
-  const result={enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,markets:marketCount,selections:selectionCount,elapsedMs:Date.now()-started,quota:apiFootballQuota};
+  const result={enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,markets:marketCount,selections:selectionCount,elapsedMs:Date.now()-started};
   liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:result.fixtures,odds:result.odds,markets:result.markets,selections:result.selections,error:null,configured:true};
   return result;
 }
@@ -817,16 +784,7 @@ async function startLiveSync(){
 
 let dbReady=false;
 app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,state:liveSyncState}}));
-app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,quota:apiFootballQuota,...liveSyncState}));
-app.post("/api/admin/live/sync",auth,requireAdmin,async(req,res)=>{
-  try{
-    const result=await syncApiFootballLive();
-    res.json({ok:true,result,quota:apiFootballQuota});
-  }catch(e){
-    liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),error:e.message,configured:Boolean(API_FOOTBALL_KEY)};
-    res.status(502).json({error:e.message||"No se pudo sincronizar API-Football",quota:apiFootballQuota});
-  }
-});
+app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,...liveSyncState}));
 app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin/",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin.html",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
