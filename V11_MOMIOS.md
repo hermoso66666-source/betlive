@@ -9,6 +9,3 @@
 - La interfaz muestra momio americano: favoritos negativos (1.94 -> -106) y no favoritos positivos (2.50 -> +150), conservando la cuota decimal entre paréntesis.
 
 Los momios negativos son otra representación del mismo precio decimal; no cambian el cálculo matemático del ticket.
-
-
-V12 añade compresión progresiva de precios durante el partido y libera rangos extremos únicamente en los minutos finales con diferencias grandes de goles.
