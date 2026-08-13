@@ -820,7 +820,7 @@ function liveSelectionKey(fixtureId,betId,value){
   return `api-football:live:${fixtureId}:${betId}:${String(value)}`.slice(0,240);
 }
 const INTERNAL_LEV_ENABLED=String(process.env.INTERNAL_LEV_ENABLED??"true").toLowerCase()!=="false";
-const INTERNAL_LEV_MARGIN=Math.max(0,Math.min(0.20,Number(process.env.INTERNAL_LEV_MARGIN||0.06)));
+const INTERNAL_LEV_MARGIN=Math.max(0,Math.min(0.20,Number(process.env.INTERNAL_LEV_MARGIN||0.045)));
 const INTERNAL_LEV_BET_WEIGHT=Math.max(0,Math.min(0.30,Number(process.env.INTERNAL_LEV_BET_WEIGHT||0.10)));
 const INTERNAL_LEV_PREDICTION_CACHE_MS=Math.max(30*60*1000,Number(process.env.INTERNAL_LEV_PREDICTION_CACHE_MS||60*60*1000));
 const INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN=Math.max(0,Math.min(100,Number(process.env.INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN||0)));
@@ -985,7 +985,7 @@ async function generateInternalLEV(event, prediction=null){
     },
     live:{minute,homeGoals:scoreHome,awayGoals:scoreAway,homePressure:.5,awayPressure:.5},
     betting:{homeAmount:pressure[0],drawAmount:pressure[1],awayAmount:pressure[2]},
-    config:{margin:INTERNAL_LEV_MARGIN,historyWeight:.45,formWeight:.20,liveWeight:.25,bettingWeight:INTERNAL_LEV_BET_WEIGHT}
+    config:{margin:INTERNAL_LEV_MARGIN,historyWeight:.25,formWeight:.10,liveWeight:.65,bettingWeight:INTERNAL_LEV_BET_WEIGHT}
   });
 
   const marketKey=`betlive:internal:lev:${fixtureId}`;

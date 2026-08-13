@@ -21,3 +21,5 @@
 .scoreline{text-align:center;font-size:12px;opacity:.75;padding:4px 0}
 .feed-notice{margin:8px 0;padding:9px 11px;background:#151515;border:1px solid #292929;color:#888;border-radius:4px;font-size:10px}.feed-notice.hidden{display:none!important}
 .lev-code{display:inline-flex;min-width:18px;justify-content:center;font-weight:900;margin-right:4px;}
+
+.decimal-odds{opacity:.55;font-weight:600;font-size:.72em}
