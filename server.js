@@ -8,7 +8,7 @@ import crypto from "crypto";
 import pg from "pg";
 import path from "path";
 import {fileURLToPath} from "url";
-import { generateLEVMarket } from "./market-engine/lev-engine.js";
+import { generateLEVMarket } from "./lev-engine.js";
 
 const {Pool}=pg;
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
@@ -403,7 +403,7 @@ app.post("/api/auth/logout",auth,(req,res)=>{res.clearCookie("bl_session",{httpO
 app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 
 // Public catalog
-app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id)) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') AND (COALESCE($1::boolean,FALSE)=FALSE OR (e.external_source='API_FOOTBALL' AND e.status='LIVE')) GROUP BY e.id ORDER BY e.starts_at LIMIT 200`,[req.query.live === "true"]);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
+app.get("/api/events",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY CASE WHEN s.code='L' THEN 1 WHEN s.code='E' THEN 2 WHEN s.code='V' THEN 3 ELSE 9 END,s.created_at) FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')) ORDER BY CASE WHEN m.market_type='INTERNAL_LEV' THEN 0 ELSE 1 END,m.created_at) FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.status IN ('OPEN','LIVE') AND (COALESCE($1::boolean,FALSE)=FALSE OR (e.external_source='API_FOOTBALL' AND e.status='LIVE')) GROUP BY e.id ORDER BY e.starts_at LIMIT 200`,[req.query.live === "true"]);res.json({events:rows})}catch(e){console.error(e);res.status(500).json({error:"No se pudieron cargar los eventos"})}});
 const UPCOMING_CACHE_MS=Math.max(30*60*1000, Number(process.env.UPCOMING_CACHE_MS||3*60*60*1000));
 let upcomingSyncState={lastSuccessAt:0,lastAttemptAt:0,lastResult:null,lastError:null};
 async function upsertUpcomingFixtures(fixtures){
@@ -742,7 +742,7 @@ const INTERNAL_LEV_ENABLED=String(process.env.INTERNAL_LEV_ENABLED??"true").toLo
 const INTERNAL_LEV_MARGIN=Math.max(0,Math.min(0.20,Number(process.env.INTERNAL_LEV_MARGIN||0.06)));
 const INTERNAL_LEV_BET_WEIGHT=Math.max(0,Math.min(0.30,Number(process.env.INTERNAL_LEV_BET_WEIGHT||0.10)));
 const INTERNAL_LEV_PREDICTION_CACHE_MS=Math.max(30*60*1000,Number(process.env.INTERNAL_LEV_PREDICTION_CACHE_MS||60*60*1000));
-const INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN=Math.max(0,Math.min(20,Number(process.env.INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN||5)));
+const INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN=Math.max(0,Math.min(100,Number(process.env.INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN||0)));
 let levPredictionsThisRun=0;
 let liveSyncRunning=false;
 let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,internalMarkets:0,error:null,configured:Boolean(API_FOOTBALL_KEY)};
@@ -774,42 +774,80 @@ async function getEventBettingTotals(eventId){
   return new Map(q.rows.map(r=>[String(r.selection_id),Number(r.stake_cents)||0]));
 }
 
-async function generateInternalLEV(event, prediction){
+async function generateInternalLEV(event, prediction=null){
   const fixtureId=String(event.external_id||"");
   if(!fixtureId) return false;
   const scoreHome=Number(event.home_score)||0, scoreAway=Number(event.away_score)||0;
-  const minute=Number(event.live_elapsed)||0;
+  const minute=Math.max(0,Math.min(120,Number(event.live_elapsed)||0));
+
+  // API-Football /predictions is optional. The internal market MUST still be generated
+  // when that endpoint has no data, because the live fixture itself is already enough
+  // for a safe baseline L/E/V market.
   const pct=prediction?.predictions?.percent||{};
-  const parsePct=(v,f)=>{const n=parseFloat(String(v??""));return Number.isFinite(n)?n/100:f};
+  const parsePct=(v,f)=>{const n=parseFloat(String(v??""));return Number.isFinite(n)?Math.max(0,Math.min(1,n/100)):f};
   const hp=parsePct(pct.home,0.45), dp=parsePct(pct.draw,0.28), ap=parsePct(pct.away,0.27);
   const hist=prediction?.teams||{};
   const hLast=parsePct(hist?.home?.last_5?.form,0.5), aLast=parsePct(hist?.away?.last_5?.form,0.5);
   const hgf=Number(hist?.home?.last_5?.goals?.for?.average);
   const agf=Number(hist?.away?.last_5?.goals?.for?.average);
-  const hga=Number(hist?.home?.last_5?.goals?.against?.average);
-  const aga=Number(hist?.away?.last_5?.goals?.against?.average);
+
+  // Aggregate exposure from existing pending tickets. This is market-wide only;
+  // it is never personalized per player.
   const betting=await getEventBettingTotals(event.id);
-  // Existing L/E/V selection ids, if any, are used only as aggregate market pressure.
   const existing=await pool.query(`SELECT id,code FROM market_selections s JOIN markets m ON m.id=s.market_id WHERE m.event_id=$1 AND m.market_type='INTERNAL_LEV'`,[event.id]);
   const totals={homeAmount:0,drawAmount:0,awayAmount:0};
-  for(const r of existing.rows){const amount=betting.get(String(r.id))||0;if(r.code==='L')totals.homeAmount+=amount;else if(r.code==='E')totals.drawAmount+=amount;else if(r.code==='V')totals.awayAmount+=amount;}
-  const pressureTotal=totals.homeAmount+totals.drawAmount+totals.awayAmount;
+  for(const r of existing.rows){
+    const amount=betting.get(String(r.id))||0;
+    if(r.code==='L') totals.homeAmount+=amount;
+    else if(r.code==='E') totals.drawAmount+=amount;
+    else if(r.code==='V') totals.awayAmount+=amount;
+  }
   const pressure=[totals.homeAmount,totals.drawAmount,totals.awayAmount];
-  if(pressureTotal===0){pressure[0]=pressure[1]=pressure[2]=1;}
+  if(pressure.every(v=>v<=0)) pressure[0]=pressure[1]=pressure[2]=1;
+
+  // Convert API-Football's prediction percentages into strength inputs when available.
+  // This fixes the previous version where hp/dp/ap were calculated but never used.
+  const apiHome=Math.max(.05,hp), apiDraw=Math.max(.05,dp), apiAway=Math.max(.05,ap);
+  const totalApi=apiHome+apiDraw+apiAway;
+  const apiNorm=[apiHome/totalApi,apiDraw/totalApi,apiAway/totalApi];
+  const homeStrength=Math.max(0,Math.min(1,.5+(apiNorm[0]-apiNorm[2])*.75));
+  const awayStrength=Math.max(0,Math.min(1,.5+(apiNorm[2]-apiNorm[0])*.75));
+
   const model=generateLEVMarket({
-    historical:{homeXg:Number.isFinite(hgf)?Math.max(.2,hgf):1.25,awayXg:Number.isFinite(agf)?Math.max(.2,agf):1.05,homeStrength:hLast,awayStrength:aLast,homeForm:hLast,awayForm:aLast},
+    historical:{
+      homeXg:Number.isFinite(hgf)?Math.max(.2,hgf):1.25,
+      awayXg:Number.isFinite(agf)?Math.max(.2,agf):1.05,
+      homeStrength,awayStrength,homeForm:hLast,awayForm:aLast
+    },
     live:{minute,homeGoals:scoreHome,awayGoals:scoreAway,homePressure:.5,awayPressure:.5},
     betting:{homeAmount:pressure[0],drawAmount:pressure[1],awayAmount:pressure[2]},
     config:{margin:INTERNAL_LEV_MARGIN,historyWeight:.45,formWeight:.20,liveWeight:.25,bettingWeight:INTERNAL_LEV_BET_WEIGHT}
   });
+
   const marketKey=`betlive:internal:lev:${fixtureId}`;
   const marketId=deterministicUuid(marketKey);
-  await pool.query(`INSERT INTO markets(id,event_id,name,market_type,status,external_key,pricing_source,pricing_updated_at) VALUES($1,$2,'Ganador del partido','INTERNAL_LEV','OPEN',$3,'BETLIVE_ENGINE',NOW()) ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET status='OPEN',pricing_source='BETLIVE_ENGINE',pricing_updated_at=NOW()`,[marketId,event.id,marketKey]);
+  await pool.query(`
+    INSERT INTO markets(id,event_id,name,market_type,status,external_key,pricing_source,pricing_updated_at)
+    VALUES($1,$2,'Ganador del partido','INTERNAL_LEV','OPEN',$3,'BETLIVE_ENGINE',NOW())
+    ON CONFLICT(external_key) WHERE external_key IS NOT NULL
+    DO UPDATE SET event_id=EXCLUDED.event_id,status='OPEN',pricing_source='BETLIVE_ENGINE',pricing_updated_at=NOW()
+  `,[marketId,event.id,marketKey]);
+
+  const seen=[];
   for(const sel of model.selections){
     const key=`betlive:internal:lev:${fixtureId}:${sel.code}`;
     const sid=deterministicUuid(key);
-    await pool.query(`INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key) VALUES($1,$2,$3,$4,$5,'OPEN',$6) ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET market_id=EXCLUDED.market_id,label=EXCLUDED.label,odds=EXCLUDED.odds,status='OPEN'`,[sid,marketId,sel.code==='L'?event.home_team:sel.code==='V'?event.away_team:'Empate',sel.code,sel.odds,key]);
+    const label=sel.code==='L'?event.home_team:sel.code==='V'?event.away_team:'Empate';
+    seen.push(key);
+    await pool.query(`
+      INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key)
+      VALUES($1,$2,$3,$4,$5,'OPEN',$6)
+      ON CONFLICT(external_key) WHERE external_key IS NOT NULL
+      DO UPDATE SET market_id=EXCLUDED.market_id,label=EXCLUDED.label,code=EXCLUDED.code,odds=EXCLUDED.odds,status='OPEN'
+    `,[sid,marketId,label,sel.code,sel.odds,key]);
   }
+  // Ensure stale internal selections can never hide the market.
+  await pool.query(`UPDATE market_selections SET status='CLOSED' WHERE market_id=$1 AND external_key IS NOT NULL AND NOT (external_key=ANY($2::text[]))`,[marketId,seen]);
   return true;
 }
 
@@ -849,7 +887,9 @@ async function syncApiFootballLive(){
       const fid=String(f?.fixture?.id||"");
       const eventQ=await pool.query("SELECT id,status,external_id,home_team,away_team,home_score,away_score,live_elapsed FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=$1 LIMIT 1",[fid]);
       if(!eventQ.rows[0]) continue;
-      const prediction=await getCachedPrediction(fid);
+      // Generate L/E/V first. Prediction data is best-effort and never a prerequisite.
+      let prediction=null;
+      try{ prediction=await getCachedPrediction(fid); }catch{}
       try{if(await generateInternalLEV(eventQ.rows[0],prediction)) internalMarkets++;}catch(e){console.error("BetLive L/E/V engine:",fid,e.message)}
     }
   }
@@ -964,6 +1004,8 @@ async function startLiveSync(){
 let dbReady=false;
 app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,state:liveSyncState}}));
 app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,apiQuota:apiFootballQuota,...liveSyncState}));
+app.get("/api/live/markets",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.external_id,e.home_team,e.away_team,e.status,e.live_elapsed,m.id market_id,m.status market_status,m.pricing_source,s.code,s.label,s.odds,s.status selection_status FROM sports_events e JOIN markets m ON m.event_id=e.id AND m.market_type='INTERNAL_LEV' LEFT JOIN market_selections s ON s.market_id=m.id WHERE e.external_source='API_FOOTBALL' AND e.status='LIVE' ORDER BY e.live_elapsed DESC NULLS LAST,e.home_team`);res.json({enabled:INTERNAL_LEV_ENABLED,markets:rows})}catch(e){res.status(500).json({error:e.message})}});
+
 app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin/",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin.html",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
