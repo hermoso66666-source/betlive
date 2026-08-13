@@ -827,6 +827,7 @@ const INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN=Math.max(0,Math.min(100,Number(proces
 let levPredictionsThisRun=0;
 let liveSyncRunning=false;
 let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,internalMarkets:0,error:null,configured:Boolean(API_FOOTBALL_KEY),scoreSource:"BETLIVE_DB",scoreSources:{apiFootball:false,backup:false,local:false}};
+let marketRunState={lastRunAt:null,lastSuccessAt:null,activeEvents:0,liveEvents:0,internalMarkets:0,errors:0,lastError:null};
 
 async function fetchBackupScoreFeed(){
   if(!SCORE_BACKUP_URL) return {events:[],source:"BACKUP_NOT_CONFIGURED"};
@@ -910,10 +911,10 @@ async function syncScoreProviders(){
 }
 
 
-async function getCachedPrediction(fixtureId){
+async function getCachedPrediction(fixtureId,{allowNetwork=true}={}){
   const q=await pool.query("SELECT payload,fetched_at FROM market_model_cache WHERE fixture_id=$1",[fixtureId]);
   if(q.rows[0] && Date.now()-new Date(q.rows[0].fetched_at).getTime()<INTERNAL_LEV_PREDICTION_CACHE_MS) return q.rows[0].payload;
-  if(levPredictionsThisRun>=INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN) return q.rows[0]?.payload||null;
+  if(!allowNetwork || levPredictionsThisRun>=INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN) return q.rows[0]?.payload||null;
   levPredictionsThisRun++;
   try{
     const d=await apiFootballGet(`/predictions?fixture=${encodeURIComponent(fixtureId)}`);
@@ -1149,8 +1150,8 @@ async function syncApiFootballLive(){
   return result;
 }
 async function generateInternalMarketsForAllActiveEvents(){
-  if(!INTERNAL_LEV_ENABLED) return {internalMarkets:0};
-  let count=0;
+  if(!INTERNAL_LEV_ENABLED) return {internalMarkets:0,activeEvents:0,errors:0};
+  const started=Date.now();
   const {rows}=await pool.query(`
     SELECT id,external_id,status,home_team,away_team,home_score,away_score,live_elapsed
     FROM sports_events
@@ -1159,15 +1160,38 @@ async function generateInternalMarketsForAllActiveEvents(){
     ORDER BY CASE WHEN status='LIVE' THEN 0 ELSE 1 END, starts_at
     LIMIT 300
   `);
+
+  // IMPORTANT: L/E/V does not wait for API-Football predictions.
+  // The local model is always able to price from score/time + internal baseline.
+  // Cached predictions may enrich the calculation when already present.
   levPredictionsThisRun=0;
+  let count=0, errors=0, lastError=null;
   for(const event of rows){
     let prediction=null;
-    if(API_FOOTBALL_KEY && event.external_id){try{prediction=await getCachedPrediction(String(event.external_id));}catch{}}
-    try{if(await generateInternalLEV(event,prediction)) count++;}catch(e){console.error('BetLive L/E/V engine:',event.id,e.message)}
+    try{
+      if(API_FOOTBALL_KEY && event.external_id){
+        prediction=await getCachedPrediction(String(event.external_id),{allowNetwork:false});
+      }
+      if(await generateInternalLEV(event,prediction)) count++;
+    }catch(e){
+      errors++; lastError=e.message;
+      console.error("BetLive L/E/V engine:",event.id,e.message);
+    }
   }
-  return {internalMarkets:count,activeEvents:rows.length};
-}
 
+  const liveCount=await pool.query("SELECT COUNT(*)::int n FROM sports_events WHERE status='LIVE'");
+  marketRunState={
+    lastRunAt:new Date().toISOString(),
+    lastSuccessAt:errors===0?new Date().toISOString():marketRunState.lastSuccessAt,
+    activeEvents:rows.length,
+    liveEvents:liveCount.rows[0]?.n||0,
+    internalMarkets:count,
+    errors,
+    lastError
+  };
+  console.log("BetLive independent market cycle",{activeEvents:rows.length,liveEvents:marketRunState.liveEvents,internalMarkets:count,errors,elapsedMs:Date.now()-started});
+  return {internalMarkets:count,activeEvents:rows.length,liveEvents:marketRunState.liveEvents,errors,lastError};
+}
 async function generateInternalMarketsForAllLiveEvents(){return generateInternalMarketsForAllActiveEvents();}
 
 async function startLiveSync(){
@@ -1176,10 +1200,12 @@ async function startLiveSync(){
     if(liveSyncRunning) return;
     liveSyncRunning=true;
     try{
+      // Market engine is independent: generate immediately from the local DB.
+      const independentBefore=await generateInternalMarketsForAllActiveEvents();
       const score=await syncScoreProviders();
       const independent=await generateInternalMarketsForAllActiveEvents();
       const apiEnrichment=score.apiOk;
-      liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:score.apiEvents+score.backupEvents,odds:0,markets:0,selections:0,internalMarkets:independent.internalMarkets,error:null,configured:Boolean(API_FOOTBALL_KEY),scoreSource:score.apiEvents>0?"API_FOOTBALL":score.backupEvents>0?"BACKUP":"BETLIVE_DB",scoreSources:{apiFootball:score.apiOk,backup:score.backupOk,local:score.localLive>0},score,promotedToLive:score.promoted||0};
+      liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:score.apiEvents+score.backupEvents,odds:0,markets:0,selections:0,internalMarkets:independent.internalMarkets,error:null,configured:Boolean(API_FOOTBALL_KEY),scoreSource:score.apiEvents>0?"API_FOOTBALL":score.backupEvents>0?"BACKUP":"BETLIVE_DB",scoreSources:{apiFootball:score.apiOk,backup:score.backupOk,local:score.localLive>0},score,promotedToLive:score.promoted||0,independentMarketRunBeforeProvider:independentBefore};
       const liveCount=await pool.query("SELECT COUNT(*)::int n FROM sports_events WHERE status='LIVE'");
       liveSyncState.liveEvents=liveCount.rows[0]?.n||0;
       console.log("BetLive score/market cycle",{score,...independent,apiEnrichment});
@@ -1237,6 +1263,10 @@ app.get("/api/health",async(req,res)=>{
         intervalSeconds:LIVE_SYNC_INTERVAL_MS/1000,
         lastRunAgeMs:lastRunMs,
         state:liveSyncState
+      },
+      independentMarketEngine:{
+        state:marketRunState,
+        rule:"L/E/V does not wait for API-Football odds or predictions"
       }
     });
   }catch(e){
@@ -1244,6 +1274,19 @@ app.get("/api/health",async(req,res)=>{
   }
 });
 app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,scoreEngine:{mode:"failover",apiFootball:Boolean(API_FOOTBALL_KEY),backup:Boolean(SCORE_BACKUP_URL),staleGraceMs:SCORE_STALE_GRACE_MS},marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent",apiFootballOptional:true},configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,apiQuota:apiFootballQuota,...liveSyncState}));
+app.post("/api/market-engine/run",async(req,res)=>{
+  try{
+    const result=await generateInternalMarketsForAllActiveEvents();
+    const counts=await pool.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM sports_events WHERE status='LIVE') AS live_events,
+        (SELECT COUNT(*)::int FROM markets WHERE market_type='INTERNAL_LEV' AND status='OPEN') AS markets,
+        (SELECT COUNT(*)::int FROM market_selections s JOIN markets m ON m.id=s.market_id
+         WHERE m.market_type='INTERNAL_LEV' AND m.status='OPEN' AND s.status='OPEN') AS selections
+    `);
+    res.json({ok:true,independent:true,result,counts:counts.rows[0],state:marketRunState});
+  }catch(e){res.status(500).json({ok:false,error:e.message,state:marketRunState})}
+});
 app.get("/api/live/markets",async(req,res)=>{
   try{
     const {rows}=await pool.query(`
