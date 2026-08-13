@@ -30,7 +30,8 @@ function render(){
     const visibleMarkets=(m.markets||[]).filter(x=>(x.selections||[]).length).slice(0,8);
     const marketHtml=visibleMarkets.map(mk=>`<div class="live-market"><b>${escapeHtml(mk.name)}</b><div class="live-market-options">${(mk.selections||[]).slice(0,6).map(s=>{
       const selected=slip.some(x=>x.selectionId===s.id);
-      return `<button class="odd ${selected?"sel":""}" data-id="${m.id}" data-sid="${s.id}" ${s.status!=="OPEN"||m.status==="CLOSED"?"disabled":""}><small>${escapeHtml(s.label)}</small><b>${Number(s.odds).toFixed(2)}</b></button>`;
+      const marketCode = s.code === 'L' ? 'L' : s.code === 'E' ? 'E' : s.code === 'V' ? 'V' : '';
+      return `<button class="odd ${selected?"sel":""}" data-id="${m.id}" data-sid="${s.id}" ${s.status!=="OPEN"||m.status==="CLOSED"?"disabled":""}><small>${marketCode?`<b class="lev-code">${marketCode}</b> `:''}${escapeHtml(s.label)}</small><b>${Number(s.odds).toFixed(2)}</b></button>`;
     }).join("")}</div></div>`).join("");
     return `<article class="match">
       <div class="matchtop"><span>${escapeHtml(m.league)}</span><span class="live">${isLive?"🔴 ":""}${escapeHtml(time)}</span><span>${m.video?"▶ VIDEO":""}</span></div>

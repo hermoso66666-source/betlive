@@ -109,10 +109,10 @@ Redirect URIs:
 Variables recomendadas en Render:
 - `API_FOOTBALL_KEY` = clave privada de API-Football.
 - `LIVE_SYNC_ENABLED=true`
-- `LIVE_SYNC_INTERVAL_MS=2700000` (45 minutos por defecto; el backend nunca baja de 10 minutos).
+- `LIVE_SYNC_INTERVAL_MS=30000` (30 segundos por defecto; el backend nunca baja de 15 segundos).
 - `UPCOMING_CACHE_MS=10800000` (3 horas por defecto).
 - `UPCOMING_ODDS_MAX_PAGES=1` (1 página por fecha para proteger el límite Free).
-- `API_MIN_REQUEST_GAP_MS=7000` (separación mínima entre llamadas del backend).
+- `API_MIN_REQUEST_GAP_MS=1500` (separación mínima entre llamadas del backend).
 - `API_LOW_REMAINING_THRESHOLD=5` (si el proveedor reporta 5 o menos solicitudes restantes, se pausa temporalmente la sincronización).
 - `API_PREFERRED_BOOKMAKER` (opcional; texto parcial del nombre del bookmaker que prefieres).
 
@@ -123,7 +123,7 @@ Variables recomendadas en Render:
 - Las cuotas que desaparecen se cierran; no se inventan momios.
 - Los mercados live ausentes de una respuesta válida se cierran para los fixtures que siguen live.
 - Se leen los headers de cuota (`x-ratelimit-requests-remaining` / `X-RateLimit-Remaining`) y se expone el estado sin mostrar la API key.
-- Se añade una separación mínima entre solicitudes para respetar el límite de 10 solicitudes/minuto.
+- Se añade una separación mínima entre solicitudes para reducir ráfagas y respetar los límites del proveedor.
 - Próximos partidos limita las páginas de `/odds?date=...` a una por fecha por defecto, evitando el patrón anterior de hasta 3 páginas por cada día.
 - Si el proveedor entrega menos cuotas por falta de página, el diagnóstico de sincronización indica las fechas truncadas.
 - El endpoint `/api/live/status` muestra el estado de la sincronización y la cuota reportada por API-Football.
@@ -135,3 +135,19 @@ No se recomienda configurar la sincronización live a 5 segundos. API-Football p
 ## Seguridad y operación
 
 Antes de operar con dinero real hay que revisar los requisitos legales y regulatorios aplicables, además de implementar verificación de edad/identidad, controles antifraude, juego responsable y un proveedor de pagos autorizado.
+
+
+## BetLive internal L-E-V market engine
+
+The live feed now keeps API-Football as the source for fixtures, score and status, while BetLive can generate its own **L / E / V** market. The internal market is shown even when `/odds/live` returns no bookmaker markets.
+
+Environment variables:
+- `INTERNAL_LEV_ENABLED=true`
+- `INTERNAL_LEV_MARGIN=0.06`
+- `INTERNAL_LEV_BET_WEIGHT=0.10`
+- `INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN=5`
+- `INTERNAL_LEV_PREDICTION_CACHE_MS=3600000`
+- `LIVE_SYNC_INTERVAL_MS=30000`
+- `API_MIN_REQUEST_GAP_MS=1500`
+
+API-Football currently documents API-FOOTBALL 3.9.3 and the v3 endpoint `https://v3.football.api-sports.io/`; the live odds endpoint is optional for this internal market.

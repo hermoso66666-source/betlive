@@ -8,6 +8,7 @@ import crypto from "crypto";
 import pg from "pg";
 import path from "path";
 import {fileURLToPath} from "url";
+import { generateLEVMarket } from "./market-engine/lev-engine.js";
 
 const {Pool}=pg;
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
@@ -25,8 +26,8 @@ const PORT=process.env.PORT||10000;
 const API_FOOTBALL_KEY=process.env.API_FOOTBALL_KEY||"";
 const API_FOOTBALL_BASE=(process.env.API_FOOTBALL_BASE_URL||"https://v3.football.api-sports.io").replace(/\/$/,"");
 const LIVE_SYNC_ENABLED=String(process.env.LIVE_SYNC_ENABLED??"true").toLowerCase()!=="false";
-const LIVE_SYNC_INTERVAL_MS=Math.max(10*60*1000,Number(process.env.LIVE_SYNC_INTERVAL_MS||45*60*1000));
-const API_MIN_REQUEST_GAP_MS=Math.max(1000,Number(process.env.API_MIN_REQUEST_GAP_MS||7000));
+const LIVE_SYNC_INTERVAL_MS=Math.max(15*1000,Number(process.env.LIVE_SYNC_INTERVAL_MS||30*1000));
+const API_MIN_REQUEST_GAP_MS=Math.max(1000,Number(process.env.API_MIN_REQUEST_GAP_MS||1500));
 const API_LOW_REMAINING_THRESHOLD=Math.max(1,Number(process.env.API_LOW_REMAINING_THRESHOLD||5));
 const UPCOMING_ODDS_MAX_PAGES=Math.max(1,Math.min(3,Number(process.env.UPCOMING_ODDS_MAX_PAGES||1)));
 const API_PREFERRED_BOOKMAKER=String(process.env.API_PREFERRED_BOOKMAKER||"").trim().toLowerCase();
@@ -77,6 +78,13 @@ async function dbInit(){
    odds NUMERIC(10,3) NOT NULL CHECK(odds>1),status VARCHAR(20) NOT NULL DEFAULT 'OPEN',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
  );
  CREATE INDEX IF NOT EXISTS idx_market_sel_market ON market_selections(market_id);
+ ALTER TABLE markets ADD COLUMN IF NOT EXISTS pricing_source VARCHAR(40) NOT NULL DEFAULT 'MANUAL';
+ ALTER TABLE markets ADD COLUMN IF NOT EXISTS pricing_updated_at TIMESTAMPTZ;
+ CREATE TABLE IF NOT EXISTS market_model_cache(
+   fixture_id VARCHAR(100) PRIMARY KEY,
+   payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+   fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ );
  ALTER TABLE markets ADD COLUMN IF NOT EXISTS external_key VARCHAR(160);
  CREATE UNIQUE INDEX IF NOT EXISTS uq_markets_external_key ON markets(external_key) WHERE external_key IS NOT NULL;
  ALTER TABLE market_selections ADD COLUMN IF NOT EXISTS external_key VARCHAR(240);
@@ -730,7 +738,80 @@ function cleanMarketName(name){
 function liveSelectionKey(fixtureId,betId,value){
   return `api-football:live:${fixtureId}:${betId}:${String(value)}`.slice(0,240);
 }
-let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,error:null,configured:Boolean(API_FOOTBALL_KEY)};
+const INTERNAL_LEV_ENABLED=String(process.env.INTERNAL_LEV_ENABLED??"true").toLowerCase()!=="false";
+const INTERNAL_LEV_MARGIN=Math.max(0,Math.min(0.20,Number(process.env.INTERNAL_LEV_MARGIN||0.06)));
+const INTERNAL_LEV_BET_WEIGHT=Math.max(0,Math.min(0.30,Number(process.env.INTERNAL_LEV_BET_WEIGHT||0.10)));
+const INTERNAL_LEV_PREDICTION_CACHE_MS=Math.max(30*60*1000,Number(process.env.INTERNAL_LEV_PREDICTION_CACHE_MS||60*60*1000));
+const INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN=Math.max(0,Math.min(20,Number(process.env.INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN||5)));
+let levPredictionsThisRun=0;
+let liveSyncRunning=false;
+let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,internalMarkets:0,error:null,configured:Boolean(API_FOOTBALL_KEY)};
+
+async function getCachedPrediction(fixtureId){
+  const q=await pool.query("SELECT payload,fetched_at FROM market_model_cache WHERE fixture_id=$1",[fixtureId]);
+  if(q.rows[0] && Date.now()-new Date(q.rows[0].fetched_at).getTime()<INTERNAL_LEV_PREDICTION_CACHE_MS) return q.rows[0].payload;
+  if(levPredictionsThisRun>=INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN) return q.rows[0]?.payload||null;
+  levPredictionsThisRun++;
+  try{
+    const d=await apiFootballGet(`/predictions?fixture=${encodeURIComponent(fixtureId)}`);
+    const payload=d?.response?.[0]||null;
+    if(payload) await pool.query(`INSERT INTO market_model_cache(fixture_id,payload,fetched_at) VALUES($1,$2,NOW()) ON CONFLICT(fixture_id) DO UPDATE SET payload=EXCLUDED.payload,fetched_at=NOW()`,[fixtureId,JSON.stringify(payload)]);
+    return payload;
+  }catch(e){
+    console.warn("BetLive prediction cache:",fixtureId,e.message);
+    return q.rows[0]?.payload||null;
+  }
+}
+
+async function getEventBettingTotals(eventId){
+  const q=await pool.query(`
+    SELECT x->>'selectionId' AS selection_id, COALESCE(SUM(t.stake_cents),0)::bigint AS stake_cents
+    FROM tickets t
+    CROSS JOIN LATERAL jsonb_array_elements(t.selections) x
+    WHERE t.status='PENDING' AND (x->>'eventId')=$1
+    GROUP BY x->>'selectionId'
+  `,[eventId]);
+  return new Map(q.rows.map(r=>[String(r.selection_id),Number(r.stake_cents)||0]));
+}
+
+async function generateInternalLEV(event, prediction){
+  const fixtureId=String(event.external_id||"");
+  if(!fixtureId) return false;
+  const scoreHome=Number(event.home_score)||0, scoreAway=Number(event.away_score)||0;
+  const minute=Number(event.live_elapsed)||0;
+  const pct=prediction?.predictions?.percent||{};
+  const parsePct=(v,f)=>{const n=parseFloat(String(v??""));return Number.isFinite(n)?n/100:f};
+  const hp=parsePct(pct.home,0.45), dp=parsePct(pct.draw,0.28), ap=parsePct(pct.away,0.27);
+  const hist=prediction?.teams||{};
+  const hLast=parsePct(hist?.home?.last_5?.form,0.5), aLast=parsePct(hist?.away?.last_5?.form,0.5);
+  const hgf=Number(hist?.home?.last_5?.goals?.for?.average);
+  const agf=Number(hist?.away?.last_5?.goals?.for?.average);
+  const hga=Number(hist?.home?.last_5?.goals?.against?.average);
+  const aga=Number(hist?.away?.last_5?.goals?.against?.average);
+  const betting=await getEventBettingTotals(event.id);
+  // Existing L/E/V selection ids, if any, are used only as aggregate market pressure.
+  const existing=await pool.query(`SELECT id,code FROM market_selections s JOIN markets m ON m.id=s.market_id WHERE m.event_id=$1 AND m.market_type='INTERNAL_LEV'`,[event.id]);
+  const totals={homeAmount:0,drawAmount:0,awayAmount:0};
+  for(const r of existing.rows){const amount=betting.get(String(r.id))||0;if(r.code==='L')totals.homeAmount+=amount;else if(r.code==='E')totals.drawAmount+=amount;else if(r.code==='V')totals.awayAmount+=amount;}
+  const pressureTotal=totals.homeAmount+totals.drawAmount+totals.awayAmount;
+  const pressure=[totals.homeAmount,totals.drawAmount,totals.awayAmount];
+  if(pressureTotal===0){pressure[0]=pressure[1]=pressure[2]=1;}
+  const model=generateLEVMarket({
+    historical:{homeXg:Number.isFinite(hgf)?Math.max(.2,hgf):1.25,awayXg:Number.isFinite(agf)?Math.max(.2,agf):1.05,homeStrength:hLast,awayStrength:aLast,homeForm:hLast,awayForm:aLast},
+    live:{minute,homeGoals:scoreHome,awayGoals:scoreAway,homePressure:.5,awayPressure:.5},
+    betting:{homeAmount:pressure[0],drawAmount:pressure[1],awayAmount:pressure[2]},
+    config:{margin:INTERNAL_LEV_MARGIN,historyWeight:.45,formWeight:.20,liveWeight:.25,bettingWeight:INTERNAL_LEV_BET_WEIGHT}
+  });
+  const marketKey=`betlive:internal:lev:${fixtureId}`;
+  const marketId=deterministicUuid(marketKey);
+  await pool.query(`INSERT INTO markets(id,event_id,name,market_type,status,external_key,pricing_source,pricing_updated_at) VALUES($1,$2,'Ganador del partido','INTERNAL_LEV','OPEN',$3,'BETLIVE_ENGINE',NOW()) ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET status='OPEN',pricing_source='BETLIVE_ENGINE',pricing_updated_at=NOW()`,[marketId,event.id,marketKey]);
+  for(const sel of model.selections){
+    const key=`betlive:internal:lev:${fixtureId}:${sel.code}`;
+    const sid=deterministicUuid(key);
+    await pool.query(`INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key) VALUES($1,$2,$3,$4,$5,'OPEN',$6) ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET market_id=EXCLUDED.market_id,label=EXCLUDED.label,odds=EXCLUDED.odds,status='OPEN'`,[sid,marketId,sel.code==='L'?event.home_team:sel.code==='V'?event.away_team:'Empate',sel.code,sel.odds,key]);
+  }
+  return true;
+}
 
 async function syncApiFootballLive(){
   if(!LIVE_SYNC_ENABLED || !API_FOOTBALL_KEY) return {enabled:LIVE_SYNC_ENABLED,configured:false,fixtures:0,odds:0};
@@ -759,9 +840,22 @@ async function syncApiFootballLive(){
         home_score=EXCLUDED.home_score,away_score=EXCLUDED.away_score,live_elapsed=EXCLUDED.live_elapsed,live_status=EXCLUDED.live_status,last_synced_at=NOW()
     `,[deterministicUuid(`event:${extId}`),leagueName,home,away,starts,status,scoreHome,scoreAway,extId,elapsed,liveStatus]);
   }
-  // One global live-odds request is deliberately used on the Free plan: it costs one API call
-  // instead of one call per fixture. We still process only the live fixtures discovered above.
-  const oddsData=await apiFootballGet("/odds/live");
+  // BetLive's own L/E/V market is generated from the live feed and cached prediction/history data.
+  // API-Football live odds are optional; a missing bookmaker market must not hide BetLive's market.
+  let internalMarkets=0;
+  levPredictionsThisRun=0;
+  if(INTERNAL_LEV_ENABLED){
+    for(const f of fixtures){
+      const fid=String(f?.fixture?.id||"");
+      const eventQ=await pool.query("SELECT id,status,external_id,home_team,away_team,home_score,away_score,live_elapsed FROM sports_events WHERE external_source='API_FOOTBALL' AND external_id=$1 LIMIT 1",[fid]);
+      if(!eventQ.rows[0]) continue;
+      const prediction=await getCachedPrediction(fid);
+      try{if(await generateInternalLEV(eventQ.rows[0],prediction)) internalMarkets++;}catch(e){console.error("BetLive L/E/V engine:",fid,e.message)}
+    }
+  }
+  // Optional API-Football odds are kept only as a secondary source for other markets.
+  let oddsData={response:[]};
+  try{ oddsData=await apiFootballGet("/odds/live"); }catch(e){ console.warn("API-Football live odds unavailable; continuing with BetLive internal market:",e.message); }
   const oddsRows=Array.isArray(oddsData.response)?oddsData.response:[];
   let marketCount=0,selectionCount=0,matchedOddsRows=0;
   const seenMarketKeys=new Set();
@@ -847,18 +941,21 @@ async function syncApiFootballLive(){
   }else{
     await pool.query("UPDATE sports_events SET status='CLOSED',last_synced_at=NOW() WHERE external_source='API_FOOTBALL' AND external_id IS NOT NULL");
   }
-  const result={enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,matchedOddsRows,markets:marketCount,selections:selectionCount,quota:apiFootballQuota,elapsedMs:Date.now()-started};
-  liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:result.fixtures,odds:result.odds,markets:result.markets,selections:result.selections,error:null,configured:true};
+  const result={enabled:true,configured:true,fixtures:fixtures.length,odds:oddsRows.length,matchedOddsRows,markets:marketCount,selections:selectionCount,internalMarkets,quota:apiFootballQuota,elapsedMs:Date.now()-started};
+  liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:result.fixtures,odds:result.odds,markets:result.markets,selections:result.selections,internalMarkets:result.internalMarkets,error:null,configured:true};
   return result;
 }
 async function startLiveSync(){
   if(!LIVE_SYNC_ENABLED) return;
   const run=async()=>{
+    if(liveSyncRunning) return;
+    liveSyncRunning=true;
     try{
       const result=await syncApiFootballLive();
       liveSyncState.lastRunAt=new Date().toISOString();
       if(result.configured) console.log("API-Football live sync",result);
     }catch(e){liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),error:e.message,configured:Boolean(API_FOOTBALL_KEY)};console.error("API-Football live sync error:",e.message)}
+    finally{liveSyncRunning=false}
   };
   await run();
   setInterval(run,LIVE_SYNC_INTERVAL_MS);
