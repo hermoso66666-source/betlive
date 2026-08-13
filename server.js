@@ -9,6 +9,7 @@ import pg from "pg";
 import path from "path";
 import {fileURLToPath} from "url";
 import { generateLEVMarket } from "./lev-engine.js";
+import { normalizeScoreFeed, chooseScoreSnapshot, canonicalEventKey } from "./score-engine.js";
 
 const {Pool}=pg;
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,10 @@ const API_MIN_REQUEST_GAP_MS=Math.max(1000,Number(process.env.API_MIN_REQUEST_GA
 const API_LOW_REMAINING_THRESHOLD=Math.max(1,Number(process.env.API_LOW_REMAINING_THRESHOLD||5));
 const UPCOMING_ODDS_MAX_PAGES=Math.max(1,Math.min(3,Number(process.env.UPCOMING_ODDS_MAX_PAGES||1)));
 const API_PREFERRED_BOOKMAKER=String(process.env.API_PREFERRED_BOOKMAKER||"").trim().toLowerCase();
+const SCORE_BACKUP_URL=String(process.env.SCORE_BACKUP_URL||"").trim().replace(/\/$/,"");
+const SCORE_BACKUP_TOKEN=String(process.env.SCORE_BACKUP_TOKEN||"").trim();
+const SCORE_BACKUP_TIMEOUT_MS=Math.max(1500,Math.min(10000,Number(process.env.SCORE_BACKUP_TIMEOUT_MS||4000)));
+const SCORE_STALE_GRACE_MS=Math.max(60*1000,Number(process.env.SCORE_STALE_GRACE_MS||10*60*1000));
 let apiFootballQuota={remaining:null,limit:null,lastRequestAt:0,lastResponseAt:null,pausedUntil:0};
 const authLimiter=rateLimit({windowMs:15*60*1000,max:40,standardHeaders:true,legacyHeaders:false});
 const ticketLimiter=rateLimit({windowMs:60*1000,max:20,standardHeaders:true,legacyHeaders:false});
@@ -68,6 +73,12 @@ async function dbInit(){
  ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS live_elapsed INT;
  ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS live_status VARCHAR(100) DEFAULT '';
  ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS score_source VARCHAR(30) NOT NULL DEFAULT 'LOCAL';
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS score_confidence NUMERIC(5,2) DEFAULT 0;
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS score_updated_at TIMESTAMPTZ;
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS canonical_key VARCHAR(220);
+ CREATE INDEX IF NOT EXISTS idx_events_status_start ON sports_events(status,starts_at);
+ CREATE INDEX IF NOT EXISTS idx_events_score_source ON sports_events(score_source);
  CREATE UNIQUE INDEX IF NOT EXISTS uq_sports_events_external ON sports_events(external_source,external_id) WHERE external_id IS NOT NULL;
  CREATE TABLE IF NOT EXISTS markets(
    id UUID PRIMARY KEY,event_id UUID NOT NULL REFERENCES sports_events(id) ON DELETE CASCADE,name VARCHAR(100) NOT NULL,market_type VARCHAR(40) NOT NULL,
@@ -490,32 +501,36 @@ async function queryUpcomingEvents(){
     SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,
     COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets
     FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id
-    WHERE e.external_source='API_FOOTBALL' AND e.status='OPEN' AND e.starts_at>=NOW()
+    WHERE e.status='OPEN' AND e.starts_at>=NOW()
     GROUP BY e.id ORDER BY e.starts_at LIMIT 100
   `);
   return rows;
 }
 app.get("/api/events/upcoming-real",async(req,res)=>{
   try{
-    if(!API_FOOTBALL_KEY) return res.status(503).json({error:"API-Football no configurada"});
-    const force=String(req.query.refresh||"") === "1";
+    const force=String(req.query.refresh||"")==="1";
     const fresh=!force && upcomingSyncState.lastSuccessAt && (Date.now()-upcomingSyncState.lastSuccessAt)<UPCOMING_CACHE_MS;
     let sync=upcomingSyncState.lastResult;
-    if(!fresh){
+    let providerError=null;
+    if(API_FOOTBALL_KEY && !fresh){
       try{
         upcomingSyncState.lastAttemptAt=Date.now();
         sync=await syncUpcomingOdds(3);
         upcomingSyncState={lastSuccessAt:Date.now(),lastAttemptAt:upcomingSyncState.lastAttemptAt,lastResult:sync,lastError:null};
       }catch(e){
+        providerError=e.message;
         upcomingSyncState.lastError=e.message;
-        console.error("upcoming-real sync",e.message);
-        // If the provider is temporarily rate-limited, return cached DB data instead of breaking the page.
-        if(!upcomingSyncState.lastSuccessAt) throw e;
+        console.warn("upcoming-real provider unavailable; using BetLive DB:",e.message);
       }
     }
+    await generateInternalMarketsForAllActiveEvents();
     const rows=await queryUpcomingEvents();
-    res.json({events:rows,source:"API_FOOTBALL",cached:fresh||Boolean(upcomingSyncState.lastError),sync,cacheMs:UPCOMING_CACHE_MS,error:upcomingSyncState.lastError||null});
-  }catch(e){console.error("upcoming-real",e);res.status(502).json({error:e.message||"No se pudieron cargar partidos reales"})}
+    res.json({events:rows,source:API_FOOTBALL_KEY&&!providerError?"API_FOOTBALL+BETLIVE":"BETLIVE",cached:fresh||Boolean(providerError),sync,cacheMs:UPCOMING_CACHE_MS,error:providerError});
+  }catch(e){
+    console.error("upcoming-real",e);
+    try{const rows=await queryUpcomingEvents(); return res.json({events:rows,source:"BETLIVE",cached:true,error:e.message});}
+    catch{res.status(502).json({error:e.message||"No se pudieron cargar partidos"})}
+  }
 });
 
 app.get("/api/quinielas",async(req,res)=>{const {rows}=await pool.query("SELECT id,name,kind,price_cents,description,active,close_at,prize_text FROM quinielas WHERE active=TRUE ORDER BY price_cents");res.json({quinielas:rows})});
@@ -601,8 +616,9 @@ app.post("/api/admin/tickets/:id/settle",auth,requireAdmin,async(req,res)=>{cons
 // Admin events / markets
 app.get("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,COUNT(ms.id)::int selections_count FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id LEFT JOIN market_selections ms ON ms.market_id=m.id GROUP BY e.id ORDER BY e.starts_at DESC LIMIT 300`);res.json({events:rows})});
 app.post("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {sport,league,homeTeam,awayTeam,startsAt,featured=false,video=false}=req.body;if(!sport||!league||!homeTeam||!awayTeam||!startsAt)return res.status(400).json({error:"Completa el evento"});const id=crypto.randomUUID();const {rows}=await pool.query("INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,featured,video) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",[id,String(sport).slice(0,40),String(league).slice(0,100),String(homeTeam).slice(0,100),String(awayTeam).slice(0,100),startsAt,Boolean(featured),Boolean(video)]);await ensureMarketTemplates();await audit(req.user.id,"CREATE_EVENT","event",id);res.status(201).json({event:rows[0]})});
-app.patch("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{const fields=[],vals=[];const map={sport:"sport",league:"league",homeTeam:"home_team",awayTeam:"away_team",startsAt:"starts_at",status:"status",homeScore:"home_score",awayScore:"away_score",featured:"featured",video:"video"};for(const [k,col] of Object.entries(map))if(req.body[k]!==undefined){fields.push(`${col}=$${vals.length+1}`);vals.push(req.body[k])}if(!fields.length)return res.status(400).json({error:"Sin cambios"});vals.push(req.params.id);const {rows}=await pool.query(`UPDATE sports_events SET ${fields.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:"Evento no encontrado"});await audit(req.user.id,"UPDATE_EVENT","event",req.params.id,req.body);res.json({event:rows[0]})});
+app.patch("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{const fields=[],vals=[];const map={sport:"sport",league:"league",homeTeam:"home_team",awayTeam:"away_team",startsAt:"starts_at",status:"status",homeScore:"home_score",awayScore:"away_score",liveElapsed:"live_elapsed",liveStatus:"live_status",featured:"featured",video:"video"};for(const [k,col] of Object.entries(map))if(req.body[k]!==undefined){fields.push(`${col}=$${vals.length+1}`);vals.push(req.body[k])}if(!fields.length)return res.status(400).json({error:"Sin cambios"});fields.push("score_source=$"+(vals.length+1));vals.push("LOCAL");fields.push("score_updated_at=NOW()");vals.push(req.params.id);const {rows}=await pool.query(`UPDATE sports_events SET ${fields.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:"Evento no encontrado"});await audit(req.user.id,"UPDATE_EVENT","event",req.params.id,req.body);res.json({event:rows[0]})});
 app.delete("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{await pool.query("DELETE FROM sports_events WHERE id=$1",[req.params.id]);await audit(req.user.id,"DELETE_EVENT","event",req.params.id);res.json({ok:true})});
+app.get("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query("SELECT * FROM sports_events WHERE id=$1",[req.params.id]);if(!rows[0])return res.status(404).json({error:"Evento no encontrado"});res.json({event:rows[0]})});
 app.get("/api/admin/events/:id/markets",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT m.id,m.name,m.market_type,m.status,jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) selections FROM markets m LEFT JOIN market_selections s ON s.market_id=m.id WHERE m.event_id=$1 GROUP BY m.id ORDER BY m.created_at`,[req.params.id]);res.json({markets:rows})});
 app.post("/api/admin/events/:id/markets",auth,requireAdmin,async(req,res)=>{const {name,marketType="MATCH_WINNER",selections=[]}=req.body;if(!name||!Array.isArray(selections)||!selections.length)return res.status(400).json({error:"Mercado incompleto"});const client=await pool.connect();try{await client.query("BEGIN");const mid=crypto.randomUUID();await client.query("INSERT INTO markets(id,event_id,name,market_type) VALUES($1,$2,$3,$4)",[mid,req.params.id,String(name).slice(0,100),String(marketType).slice(0,40)]);for(const s of selections){const odds=Number(s.odds);if(!s.label||!Number.isFinite(odds)||odds<=1)throw new Error("Cuota inválida");await client.query("INSERT INTO market_selections(id,market_id,label,code,odds) VALUES($1,$2,$3,$4,$5)",[crypto.randomUUID(),mid,String(s.label).slice(0,100),String(s.code||"").slice(0,30),odds])}await client.query("COMMIT");await audit(req.user.id,"CREATE_MARKET","event",req.params.id,{name});res.status(201).json({ok:true,marketId:mid})}catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}});
 app.patch("/api/admin/selections/:id",auth,requireAdmin,async(req,res)=>{const fields=[],vals=[];if(req.body.odds!==undefined){const o=Number(req.body.odds);if(!Number.isFinite(o)||o<=1)return res.status(400).json({error:"Cuota inválida"});fields.push(`odds=$${vals.length+1}`);vals.push(o)}if(req.body.status!==undefined){fields.push(`status=$${vals.length+1}`);vals.push(String(req.body.status).toUpperCase())}if(!fields.length)return res.status(400).json({error:"Sin cambios"});vals.push(req.params.id);const {rows}=await pool.query(`UPDATE market_selections SET ${fields.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:"Selección no encontrada"});await audit(req.user.id,"UPDATE_ODDS","selection",req.params.id,req.body);res.json({selection:rows[0]})});
@@ -745,7 +761,75 @@ const INTERNAL_LEV_PREDICTION_CACHE_MS=Math.max(30*60*1000,Number(process.env.IN
 const INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN=Math.max(0,Math.min(100,Number(process.env.INTERNAL_LEV_MAX_PREDICTIONS_PER_RUN||0)));
 let levPredictionsThisRun=0;
 let liveSyncRunning=false;
-let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,internalMarkets:0,error:null,configured:Boolean(API_FOOTBALL_KEY)};
+let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,internalMarkets:0,error:null,configured:Boolean(API_FOOTBALL_KEY),scoreSource:"BETLIVE_DB",scoreSources:{apiFootball:false,backup:false,local:false}};
+
+async function fetchBackupScoreFeed(){
+  if(!SCORE_BACKUP_URL) return {events:[],source:"BACKUP_NOT_CONFIGURED"};
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),SCORE_BACKUP_TIMEOUT_MS);
+  try{
+    const headers={accept:"application/json"};
+    if(SCORE_BACKUP_TOKEN) headers.authorization=`Bearer ${SCORE_BACKUP_TOKEN}`;
+    const r=await fetch(SCORE_BACKUP_URL,{headers,signal:controller.signal});
+    if(!r.ok) throw new Error(`backup score feed HTTP ${r.status}`);
+    const data=await r.json();
+    return {events:normalizeScoreFeed(data),source:"BACKUP"};
+  }finally{clearTimeout(timer)}
+}
+
+async function upsertCanonicalScoreEvent(item,source){
+  const key=canonicalEventKey(item);
+  if(!key) return null;
+  const existing=await pool.query(`SELECT id,status FROM sports_events WHERE canonical_key=$1 OR (lower(home_team)=lower($2) AND lower(away_team)=lower($3) AND abs(extract(epoch from (starts_at-$4::timestamptz))) < 21600) ORDER BY CASE WHEN status='LIVE' THEN 0 ELSE 1 END LIMIT 1`,[key,item.home,item.away,item.startsAt]);
+  const id=existing.rows[0]?.id||crypto.randomUUID();
+  const status=item.status==='LIVE'?'LIVE':item.status==='FINISHED'?'CLOSED':'OPEN';
+  const confidence=Number.isFinite(Number(item.confidence))?Math.max(0,Math.min(100,Number(item.confidence))):(source==='API_FOOTBALL'?95:source==='BACKUP'?85:60);
+  await pool.query(`
+    INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,featured,video,external_source,external_id,live_elapsed,live_status,last_synced_at,score_source,score_confidence,score_updated_at,canonical_key)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,FALSE,$10,$11,$12,$13,NOW(),$10,$14,NOW(),$15)
+    ON CONFLICT(id) DO UPDATE SET sport=EXCLUDED.sport,league=EXCLUDED.league,home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,starts_at=EXCLUDED.starts_at,status=EXCLUDED.status,home_score=EXCLUDED.home_score,away_score=EXCLUDED.away_score,external_source=EXCLUDED.external_source,external_id=EXCLUDED.external_id,live_elapsed=EXCLUDED.live_elapsed,live_status=EXCLUDED.live_status,last_synced_at=NOW(),score_source=EXCLUDED.score_source,score_confidence=EXCLUDED.score_confidence,score_updated_at=NOW(),canonical_key=EXCLUDED.canonical_key
+  `,[id,item.sport||"Fútbol",item.league||"",item.home,item.away,item.startsAt||new Date().toISOString(),status,Number(item.homeScore)||0,Number(item.awayScore)||0,source,item.externalId||null,item.elapsed??null,item.liveStatus||"",confidence,key]);
+  return id;
+}
+
+async function applyScoreFeed(items,source){
+  let updated=0;
+  for(const item of items){ try{ if(await upsertCanonicalScoreEvent(item,source)) updated++; }catch(e){ console.warn("score feed item skipped",e.message); } }
+  return updated;
+}
+
+async function preserveLocalLiveState(){
+  const q=await pool.query(`SELECT id,home_team,away_team,home_score,away_score,live_elapsed,live_status,score_updated_at FROM sports_events WHERE status='LIVE'`);
+  const now=Date.now();
+  let preserved=0;
+  for(const e of q.rows){
+    const age=e.score_updated_at?now-new Date(e.score_updated_at).getTime():Infinity;
+    if(age<=SCORE_STALE_GRACE_MS){preserved++;continue;}
+    // Stale data remains visible but is flagged; it is never silently converted to CLOSED.
+    await pool.query("UPDATE sports_events SET score_source='STALE_CACHE',live_status=CASE WHEN live_status='' THEN 'Datos en caché' ELSE live_status END WHERE id=$1",[e.id]);
+    preserved++;
+  }
+  return preserved;
+}
+
+async function syncScoreProviders(){
+  let apiEvents=0,backupEvents=0,apiOk=false,backupOk=false,apiError=null,backupError=null;
+  if(API_FOOTBALL_KEY){
+    try{
+      const data=await apiFootballGet("/fixtures?live=all");
+      const items=normalizeScoreFeed(data,"API_FOOTBALL");
+      apiEvents=await applyScoreFeed(items,"API_FOOTBALL"); apiOk=true;
+    }catch(e){apiError=e.message;console.warn("API-Football score feed unavailable:",e.message)}
+  }
+  // Backup is used when primary failed OR returned no live fixtures.
+  if(SCORE_BACKUP_URL && (!apiOk || apiEvents===0)){
+    try{const b=await fetchBackupScoreFeed();backupEvents=await applyScoreFeed(b.events,"BACKUP");backupOk=true;}catch(e){backupError=e.message;console.warn("Backup score feed unavailable:",e.message)}
+  }
+  const local=(await pool.query("SELECT COUNT(*)::int n FROM sports_events WHERE status='LIVE' AND score_source IN ('LOCAL','STALE_CACHE')")).rows[0]?.n||0;
+  await preserveLocalLiveState();
+  return {apiEvents,backupEvents,localLive:local,apiOk,backupOk,apiError,backupError};
+}
+
 
 async function getCachedPrediction(fixtureId){
   const q=await pool.query("SELECT payload,fetched_at FROM market_model_cache WHERE fixture_id=$1",[fixtureId]);
@@ -985,21 +1069,20 @@ async function syncApiFootballLive(){
   liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:result.fixtures,odds:result.odds,markets:result.markets,selections:result.selections,internalMarkets:result.internalMarkets,error:null,configured:true};
   return result;
 }
-async function generateInternalMarketsForAllLiveEvents(){
+async function generateInternalMarketsForAllActiveEvents(){
   if(!INTERNAL_LEV_ENABLED) return {internalMarkets:0};
   let count=0;
-  const {rows}=await pool.query(`SELECT id,external_id,status,home_team,away_team,home_score,away_score,live_elapsed FROM sports_events WHERE status='LIVE'`);
+  const {rows}=await pool.query(`SELECT id,external_id,status,home_team,away_team,home_score,away_score,live_elapsed FROM sports_events WHERE status IN ('OPEN','LIVE') AND starts_at>=NOW()-INTERVAL '3 hours' AND starts_at<=NOW()+INTERVAL '14 days' ORDER BY starts_at LIMIT 300`);
+  levPredictionsThisRun=0;
   for(const event of rows){
     let prediction=null;
-    // Optional enrichment only. A missing provider must never block pricing.
-    if(API_FOOTBALL_KEY && event.external_id){
-      try{ prediction=await getCachedPrediction(String(event.external_id)); }catch{}
-    }
-    try{ if(await generateInternalLEV(event,prediction)) count++; }
-    catch(e){ console.error('BetLive independent L/E/V engine:',event.id,e.message); }
+    if(API_FOOTBALL_KEY && event.external_id){try{prediction=await getCachedPrediction(String(event.external_id));}catch{}}
+    try{if(await generateInternalLEV(event,prediction)) count++;}catch(e){console.error('BetLive L/E/V engine:',event.id,e.message)}
   }
-  return {internalMarkets:count};
+  return {internalMarkets:count,activeEvents:rows.length};
 }
+
+async function generateInternalMarketsForAllLiveEvents(){return generateInternalMarketsForAllActiveEvents();}
 
 async function startLiveSync(){
   if(!LIVE_SYNC_ENABLED) return;
@@ -1007,18 +1090,15 @@ async function startLiveSync(){
     if(liveSyncRunning) return;
     liveSyncRunning=true;
     try{
-      let providerResult={enabled:LIVE_SYNC_ENABLED,configured:false,fixtures:0,odds:0,internalMarkets:0,optional:true};
-      if(API_FOOTBALL_KEY){
-        try{ providerResult=await syncApiFootballLive(); }
-        catch(e){ console.warn("API-Football enrichment unavailable; BetLive continues independently:",e.message); }
-      }
-      const independent=await generateInternalMarketsForAllLiveEvents();
-      liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:providerResult.fixtures||0,odds:providerResult.odds||0,markets:providerResult.markets||0,selections:providerResult.selections||0,internalMarkets:independent.internalMarkets,error:null,configured:Boolean(API_FOOTBALL_KEY)};
-      console.log("BetLive independent market engine",{...providerResult,...independent});
+      const score=await syncScoreProviders();
+      const independent=await generateInternalMarketsForAllActiveEvents();
+      const apiEnrichment=score.apiOk;
+      liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),fixtures:score.apiEvents+score.backupEvents,odds:0,markets:0,selections:0,internalMarkets:independent.internalMarkets,error:null,configured:Boolean(API_FOOTBALL_KEY),scoreSource:score.apiEvents>0?"API_FOOTBALL":score.backupEvents>0?"BACKUP":"BETLIVE_DB",scoreSources:{apiFootball:score.apiOk,backup:score.backupOk,local:score.localLive>0},score};
+      console.log("BetLive score/market cycle",{score,...independent,apiEnrichment});
     }catch(e){
-      // Even if optional enrichment fails, preserve the independent engine state.
-      liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),error:e.message,configured:Boolean(API_FOOTBALL_KEY)};
-      console.error("BetLive market engine error:",e.message);
+      const independent=await generateInternalMarketsForAllActiveEvents().catch(()=>({internalMarkets:0}));
+      liveSyncState={...liveSyncState,lastRunAt:new Date().toISOString(),internalMarkets:independent.internalMarkets,error:e.message,configured:Boolean(API_FOOTBALL_KEY)};
+      console.error("BetLive resilient cycle error:",e.message);
     }finally{liveSyncRunning=false}
   };
   await run();
@@ -1026,8 +1106,8 @@ async function startLiveSync(){
 }
 
 let dbReady=false;
-app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent",apiFootballOptional:Boolean(API_FOOTBALL_KEY)},live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,state:liveSyncState}}));
-app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent",apiFootballOptional:true},configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,apiQuota:apiFootballQuota,...liveSyncState}));
+app.get("/api/health",(req,res)=>res.status(200).json({ok:true,database:dbReady,scoreEngine:{mode:"failover",apiFootball:Boolean(API_FOOTBALL_KEY),backup:Boolean(SCORE_BACKUP_URL),staleGraceMs:SCORE_STALE_GRACE_MS},marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent",apiFootballOptional:true},live:{enabled:LIVE_SYNC_ENABLED,configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,state:liveSyncState}}));
+app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,scoreEngine:{mode:"failover",apiFootball:Boolean(API_FOOTBALL_KEY),backup:Boolean(SCORE_BACKUP_URL),staleGraceMs:SCORE_STALE_GRACE_MS},marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent",apiFootballOptional:true},configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,apiQuota:apiFootballQuota,...liveSyncState}));
 app.get("/api/live/markets",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.external_id,e.home_team,e.away_team,e.status,e.live_elapsed,m.id market_id,m.status market_status,m.pricing_source,s.code,s.label,s.odds,s.status selection_status FROM sports_events e JOIN markets m ON m.event_id=e.id AND m.market_type='INTERNAL_LEV' LEFT JOIN market_selections s ON s.market_id=m.id WHERE e.status='LIVE' ORDER BY e.live_elapsed DESC NULLS LAST,e.home_team`);res.json({enabled:INTERNAL_LEV_ENABLED,markets:rows})}catch(e){res.status(500).json({error:e.message})}});
 
 app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
