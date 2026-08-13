@@ -23,8 +23,3 @@
 .lev-code{display:inline-flex;min-width:18px;justify-content:center;font-weight:900;margin-right:4px;}
 
 .decimal-odds{opacity:.55;font-weight:600;font-size:.72em}
-
-.hot-stats{margin:8px 12px 12px;padding:10px;border:1px solid #343434;border-radius:10px;background:#151515;font-size:12px}
-.hot-stats>b{display:block;margin-bottom:7px}
-.hot-stats>div{display:flex;gap:8px;flex-wrap:wrap;color:#bbb}
-.hot-stats span{padding:5px 7px;background:#202020;border-radius:6px}

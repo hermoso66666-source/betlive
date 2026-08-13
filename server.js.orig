@@ -1,97 +1,4 @@
 const HOT_CATEGORY_LABEL = "HOT · Liga Virtual";
-const HOT_ENABLED=String(process.env.HOT_ENABLED??"true").toLowerCase()!=="false";
-const HOT_INTERVAL_MS=4*60*1000;
-const HOT_DURATION_MINUTES=8;
-const HOT_FOOTBALL_HOURS=true;
-const HOT_OTHER_START_HOUR=8;
-const HOT_OTHER_END_HOUR=20;
-const HOT_ROLLING_HOURS=28;
-const HOT_ROTATION_HOURS=4;
-const HOT_SPORTS=["Fútbol","Básquetbol","Béisbol","Tenis"];
-const HOT_TEAM_POOLS={
-  "Fútbol":[["Aston Avila","New Castel"],["Madri Nova","Barceluna"],["Munich Red","Paris Azul"],["Milan Norte","Londres City"],["Madrid Rayo","Liverpool Sol"]],
-  "Básquetbol":[["Los Angeles Stars","Boston Greens"],["Golden Bay","Chicago Bullsmen"],["Miami Waves","New York Knights"],["Dallas Rockets","Phoenix Sunside"]],
-  "Béisbol":[["Los Angeles Bats","New York Kings"],["Boston Redcaps","Chicago Cubsmen"],["Texas Rangers FC","Miami Marlinside"],["San Diego Padres Club","Atlanta Bravesmen"]],
-  "Tenis":[["Madrid Open","London Aces"],["Paris Smash","New York Serve"],["Roma Masters","Tokyo Rackets"],["Miami Open","Toronto Nets"]]
-};
-const HOT_PLAYER_NAMES=[
-"Aaron Avila","Bruno Castillo","Carlos Mendoza","Damián Reyes","Emilio Torres","Fabio Navarro","Gael Romero","Héctor Salinas","Iván Duarte","Julián Vega",
-"Kevin Montes","Leo Carranza","Marco Silva","Nico Valdés","Óscar Molina","Pablo Ríos","Raúl Cabrera","Santiago Cruz","Tomás Herrera","Uriel Santos",
-"Víctor Luna","William Prado","Xavier Mora","Yahir Campos","Zaid Flores","Adrián Solís","Bastián León","César Fuentes","Diego Aranda","Enzo Vargas",
-"Fabián Ponce","Gonzalo Meza","Hugo Treviño","Isaac Beltrán","Jairo Castañeda","Karlo Medina","Lautaro Nieto","Matías Peralta","Nando Lozano","Oliver Rivas",
-"Patricio Cano","Ramiro Ibarra","Samuel Vela","Thiago Peña","Ulises Franco","Valentín Soto","Walter Lara","Ximena Paredes","Yosef Bravo","Zacarías Mora",
-"Alonso Vidal","Benjamín Orozco","Cristóbal Vera","Darío Escalante","Esteban Patiño","Félix Nájera","Gerardo Acosta","Horacio Gil","Iker Zamora","Joaquín Parra",
-"Kenzo Rangel","Lucas Figueroa","Manuel Cárdenas","Néstor Vázquez","Octavio Rosales","Pedro Alvarado","Rafael Cordero","Sergio Palacios","Tadeo Márquez","Valerio Robles",
-"Agustín Valle","Baltazar Quiroz","Ciro Estrada","Dante Zamudio","Ezequiel Prado","Franco Téllez","Germán Lara","Hernán Rubio","Ismael Pineda","Jerónimo Cano",
-"Lisandro Mora","Máximo Trejo","Noé Valdez","Omar Carrillo","Primo Sosa","Renato Nava","Salvador Leal","Teo Murillo","Urias Ponce","Vasco Rojas",
-"Alan Escobar","Braulio Mena","Cayetano Rivas","Darwin Soto","Emanuel Vega","Fermín Rocha","Gustavo Linares","Héctor Prado","Ignacio Serra","Jorge Castaño",
-"Leandro Vela","Mauricio Tapia","Nicolás Roldán","Orlando Paz","Pascual Moya","Rodrigo Beltrán","Simón Aguirre","Tristán Paredes","Valentín Mora","Yago Herrera"
-];
-const HOT_PLAYER_ALIASES=["Madness","Tom","Blaze","Raptor","Nova","Flash","Titan","Ghost","Fury","Ace","Storm","Viper","Rocket","Shadow","Wolf","Cobra","Joker","Phoenix","Zero","Legend"];
-function hotHash(n){let x=Math.abs(Math.sin(Number(n)+17)*1000000);return Math.floor(x);}
-function hotRotationSlot(date){return Math.floor(new Date(date).getTime()/(HOT_ROTATION_HOURS*60*60*1000));}
-function hotPlayer(slot,index){
-  const i=(hotHash(slot*97+index*31))%HOT_PLAYER_NAMES.length;
-  const alias=HOT_PLAYER_ALIASES[(hotHash(slot*53+index*11))%HOT_PLAYER_ALIASES.length];
-  return `${HOT_PLAYER_NAMES[i]}(${alias})`;
-}
-function hotIsAllowedStart(date,sport){
-  if(sport==="Fútbol") return true;
-  const h=Number(new Intl.DateTimeFormat("en-US",{timeZone:"America/Mexico_City",hour:"2-digit",hour12:false}).format(new Date(date)));
-  return h>=HOT_OTHER_START_HOUR && h<HOT_OTHER_END_HOUR;
-}
-function hotTeamName(sport,slot,index){
-  const pool=HOT_TEAM_POOLS[sport]||HOT_TEAM_POOLS["Fútbol"];
-  const pair=pool[(slot+index)%pool.length];
-  return `${pair[0]} (${hotPlayer(slot,index*2)})`;
-}
-function hotMakePair(sport,slot,index){
-  const pool=HOT_TEAM_POOLS[sport]||HOT_TEAM_POOLS["Fútbol"];
-  const pair=pool[(slot+index)%pool.length];
-  return {
-    home:`${pair[0]} (${hotPlayer(slot,index*2)})`,
-    away:`${pair[1]} (${hotPlayer(slot,index*2+1)})`
-  };
-}
-function hotStatsFor(event){
-  const elapsed=Math.max(0,Math.min(HOT_DURATION_MINUTES,Number(event.live_elapsed)||0));
-  const seed=hotHash(String(event.id).split("-").reduce((a,x)=>a+x.charCodeAt(0),0));
-  const home=Number(event.home_score)||0, away=Number(event.away_score)||0;
-  const base=(seed%41)+30;
-  return {
-    elapsed,
-    possession:[Math.max(35,Math.min(65,base+(home-away)*2)),0],
-    shots:[Math.max(home+1,(seed%7)+elapsed),Math.max(away+1,(seed%6)+Math.floor(elapsed*.8))],
-    shotsOnTarget:[Math.max(home,(seed%4)+Math.floor(elapsed/3)),Math.max(away,(seed%3)+Math.floor(elapsed/4))],
-    attacks:[(seed%18)+elapsed*3,(seed%16)+elapsed*3],
-    corners:[Math.min(12,Math.floor(elapsed/3)+(seed%3)),Math.min(12,Math.floor(elapsed/4)+((seed>>2)%3))],
-    fouls:[(seed%5)+Math.floor(elapsed/2),((seed>>3)%5)+Math.floor(elapsed/2)],
-    winPct:[0,0,0]
-  };
-}
-function hotWinPct(home,away,elapsed){
-  const t=Math.max(0,Math.min(1,elapsed/HOT_DURATION_MINUTES)), d=home-away;
-  let hp=.40+d*.13+t*.05, ap=.40-d*.13+t*.05, dp=1-hp-ap;
-  if(d>0){hp+=.08*t;ap-=.05*t;dp-=.03*t}
-  if(d<0){ap+=.08*t;hp-=.05*t;dp-=.03*t}
-  const vals=[hp,dp,ap].map(x=>Math.max(.03,x)); const sum=vals.reduce((a,b)=>a+b,0);
-  return vals.map(x=>Math.round(x/sum*100));
-}
-function hotMarketOdds(event){
-  const elapsed=Math.max(0,Math.min(HOT_DURATION_MINUTES,Number(event.live_elapsed)||0));
-  const h=Number(event.home_score)||0,a=Number(event.away_score)||0;
-  const p=hotWinPct(h,a,elapsed);
-  const margin=.07;
-  const probs=p.map(x=>Math.max(.02,x/100));
-  const prices=probs.map(x=>Math.max(1.01,1/(x*(1+margin))));
-  const american=o=>o>=2?Math.round((o-1)*100):Math.round(-100/(o-1));
-  return [
-    {code:"L",label:event.home_team,odds:Number(prices[0].toFixed(2)),american:american(prices[0])},
-    {code:"E",label:"Empate",odds:Number(prices[1].toFixed(2)),american:american(prices[1])},
-    {code:"V",label:event.away_team,odds:Number(prices[2].toFixed(2)),american:american(prices[2])}
-  ];
-}
-
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -174,13 +81,6 @@ async function dbInit(){
  ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS score_confidence NUMERIC(5,2) DEFAULT 0;
  ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS score_updated_at TIMESTAMPTZ;
  ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS canonical_key VARCHAR(220);
- ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS hot_enabled BOOLEAN NOT NULL DEFAULT FALSE;
- ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS hot_locked BOOLEAN NOT NULL DEFAULT FALSE;
- ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS hot_winner VARCHAR(10);
- ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS hot_stats JSONB NOT NULL DEFAULT '{}'::jsonb;
- ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS hot_rotation BIGINT;
- CREATE INDEX IF NOT EXISTS idx_hot_events ON sports_events(hot_enabled,status,starts_at);
-
  CREATE INDEX IF NOT EXISTS idx_events_status_start ON sports_events(status,starts_at);
  CREATE INDEX IF NOT EXISTS idx_events_score_source ON sports_events(score_source);
  CREATE UNIQUE INDEX IF NOT EXISTS uq_sports_events_external ON sports_events(external_source,external_id) WHERE external_id IS NOT NULL;
@@ -518,39 +418,6 @@ app.post("/api/auth/logout",auth,(req,res)=>{res.clearCookie("bl_session",{httpO
 app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 
 // Public catalog
-app.get("/api/events/hot",async(req,res)=>{
-  try{
-    await advanceHotEvents();
-    const live=String(req.query.live||"true")==="true";
-    const {rows}=await pool.query(`
-      SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,e.hot_stats,
-      COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',
-        (SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at)
-         FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')) ORDER BY m.created_at)
-        FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets
-      FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id
-      WHERE e.hot_enabled=TRUE AND e.status IN ('OPEN','LIVE') AND ($1::boolean=FALSE OR e.status='LIVE')
-      GROUP BY e.id ORDER BY e.starts_at LIMIT 250
-    `,[live]);
-    res.json({events:rows,source:"HOT_ENGINE",category:HOT_CATEGORY_LABEL,intervalMs:HOT_INTERVAL_MS,durationMinutes:HOT_DURATION_MINUTES});
-  }catch(e){res.status(500).json({error:e.message})}
-});
-app.get("/api/events/hot/upcoming",async(req,res)=>{
-  try{
-    await advanceHotEvents();
-    const {rows}=await pool.query(`
-      SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,e.hot_stats,
-      COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',
-        (SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at)
-         FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')) ORDER BY m.created_at)
-        FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets
-      FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id
-      WHERE e.hot_enabled=TRUE AND e.status='OPEN' AND e.starts_at>=NOW()
-      GROUP BY e.id ORDER BY e.starts_at LIMIT 250
-    `);
-    res.json({events:rows,source:"HOT_ENGINE",category:HOT_CATEGORY_LABEL});
-  }catch(e){res.status(500).json({error:e.message})}
-});
 app.get("/api/events",async(req,res)=>{
   try{
     // Self-heal: the market engine is independent and should be able to repair
@@ -571,7 +438,7 @@ app.get("/api/events",async(req,res)=>{
              FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets
       FROM sports_events e
       LEFT JOIN markets m ON m.event_id=e.id
-      WHERE e.status IN ('OPEN','LIVE') AND COALESCE(e.hot_enabled,FALSE)=FALSE
+      WHERE e.status IN ('OPEN','LIVE')
         AND (COALESCE($1::boolean,FALSE)=FALSE OR e.status='LIVE')
       GROUP BY e.id ORDER BY CASE WHEN e.status='LIVE' THEN 0 ELSE 1 END,e.starts_at
       LIMIT 200
@@ -668,7 +535,7 @@ async function queryUpcomingEvents(){
     SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,
     COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',(SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')) ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::jsonb) markets
     FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id
-    WHERE e.status='OPEN' AND e.starts_at>=NOW() AND COALESCE(e.hot_enabled,FALSE)=FALSE
+    WHERE e.status='OPEN' AND e.starts_at>=NOW()
     GROUP BY e.id ORDER BY e.starts_at LIMIT 100
   `);
   return rows;
@@ -780,31 +647,6 @@ app.get("/api/admin/users/:id/transactions",auth,requireAdmin,async(req,res)=>{c
 app.get("/api/admin/tickets",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT t.id,t.stake_cents,t.total_odds,t.potential_cents,t.status,t.selections,t.created_at,t.settled_at,u.name user_name,u.email user_email FROM tickets t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 300`);res.json({tickets:rows})});
 app.post("/api/admin/tickets/:id/settle",auth,requireAdmin,async(req,res)=>{const status=String(req.body.status||"").toUpperCase();if(!['WON','LOST','VOID'].includes(status))return res.status(400).json({error:"Estado inválido"});const client=await pool.connect();try{await client.query("BEGIN");const q=await client.query("SELECT * FROM tickets WHERE id=$1 FOR UPDATE",[req.params.id]);if(!q.rows[0])throw new Error("Ticket no encontrado");if(q.rows[0].status!=="PENDING")throw new Error("El ticket ya fue liquidado");const t=q.rows[0];let credit=0;if(status==='WON')credit=Number(t.potential_cents);if(status==='VOID')credit=Number(t.stake_cents);const u=await client.query("SELECT balance_cents FROM users WHERE id=$1 FOR UPDATE",[t.user_id]);const next=(BigInt(u.rows[0].balance_cents)+BigInt(credit)).toString();await client.query("UPDATE tickets SET status=$1,settled_at=NOW() WHERE id=$2",[status,t.id]);if(credit>0){await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next,t.user_id]);await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,type,amount_cents,balance_after_cents,reason,reference_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[crypto.randomUUID(),t.user_id,req.user.id,status,credit,next,`Liquidación ${status} ${t.id}`,t.id])}await client.query("COMMIT");await audit(req.user.id,"SETTLE_TICKET","ticket",t.id,{status,credit});res.json({ok:true,status})}catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}});
 
-
-// HOT / 2H2 controls
-app.get("/api/admin/hot/status",auth,requireAdmin,async(req,res)=>{
-  const q=await pool.query(`SELECT COUNT(*) FILTER(WHERE status='LIVE')::int live,COUNT(*) FILTER(WHERE status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE status='CLOSED')::int closed FROM sports_events WHERE hot_enabled=TRUE`);
-  const next=await pool.query(`SELECT id,sport,home_team,away_team,starts_at,status,home_score,away_score,live_elapsed,hot_locked,hot_winner,hot_stats FROM sports_events WHERE hot_enabled=TRUE AND status IN ('OPEN','LIVE') ORDER BY starts_at LIMIT 40`);
-  res.json({enabled:HOT_ENABLED,intervalMinutes:4,durationMinutes:8,rotationHours:4,hours:{football:"24/7",other:"08:00-20:00"},counts:q.rows[0],events:next.rows});
-});
-app.post("/api/admin/hot/generate",auth,requireAdmin,async(req,res)=>{try{const r=await seedHotSchedule();await advanceHotEvents();await audit(req.user.id,"HOT_GENERATE","hot",null,r);res.json({ok:true,...r})}catch(e){res.status(500).json({ok:false,error:e.message})}});
-app.post("/api/admin/hot/event/:id/control",auth,requireAdmin,async(req,res)=>{
-  try{
-    const {status,homeScore,awayScore,elapsed,winner,locked=true}=req.body;
-    const fields=["hot_locked=$1","score_source='HOT_ADMIN'","score_confidence=100","score_updated_at=NOW()"],vals=[Boolean(locked)];
-    if(status!==undefined){fields.push(`status=$${vals.length+1}`);vals.push(String(status).toUpperCase())}
-    if(homeScore!==undefined){fields.push(`home_score=$${vals.length+1}`);vals.push(Math.max(0,Math.trunc(Number(homeScore)||0)))}
-    if(awayScore!==undefined){fields.push(`away_score=$${vals.length+1}`);vals.push(Math.max(0,Math.trunc(Number(awayScore)||0)))}
-    if(elapsed!==undefined){fields.push(`live_elapsed=$${vals.length+1}`);vals.push(Math.max(0,Math.min(HOT_DURATION_MINUTES,Math.trunc(Number(elapsed)||0))))}
-    if(winner!==undefined){fields.push(`hot_winner=$${vals.length+1}`);vals.push(String(winner).slice(0,10))}
-    const idVal=vals.length+1;vals.push(req.params.id);
-    const q=await pool.query(`UPDATE sports_events SET ${fields.join(",")} WHERE id=$${idVal} AND hot_enabled=TRUE RETURNING *`,vals);
-    if(!q.rows[0])return res.status(404).json({error:"HOT no encontrado"});
-    await ensureHotMarket(q.rows[0]);await audit(req.user.id,"HOT_CONTROL","event",req.params.id,{status,homeScore,awayScore,elapsed,winner,locked});
-    res.json({ok:true,event:q.rows[0]});
-  }catch(e){res.status(500).json({ok:false,error:e.message})}
-});
-
 // Admin events / markets
 app.patch("/api/admin/events/:id/live",auth,requireAdmin,async(req,res)=>{
   try{
@@ -838,9 +680,9 @@ app.post("/api/admin/markets/repair",auth,requireAdmin,async(req,res)=>{
     res.json({ok:true,result,liveInternal:check.rows[0]});
   }catch(e){res.status(500).json({ok:false,error:e.message})}
 });
-app.get("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.hot_enabled,e.hot_locked,e.hot_winner,COUNT(ms.id)::int selections_count FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id LEFT JOIN market_selections ms ON ms.market_id=m.id GROUP BY e.id ORDER BY e.starts_at DESC LIMIT 300`);res.json({events:rows})});
+app.get("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,COUNT(ms.id)::int selections_count FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id LEFT JOIN market_selections ms ON ms.market_id=m.id GROUP BY e.id ORDER BY e.starts_at DESC LIMIT 300`);res.json({events:rows})});
 app.post("/api/admin/events",auth,requireAdmin,async(req,res)=>{const {sport,league,homeTeam,awayTeam,startsAt,featured=false,video=false}=req.body;if(!sport||!league||!homeTeam||!awayTeam||!startsAt)return res.status(400).json({error:"Completa el evento"});const id=crypto.randomUUID();const {rows}=await pool.query("INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,featured,video) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",[id,String(sport).slice(0,40),String(league).slice(0,100),String(homeTeam).slice(0,100),String(awayTeam).slice(0,100),startsAt,Boolean(featured),Boolean(video)]);await ensureMarketTemplates();await audit(req.user.id,"CREATE_EVENT","event",id);res.status(201).json({event:rows[0]})});
-app.patch("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{const fields=[],vals=[];const map={sport:"sport",league:"league",homeTeam:"home_team",awayTeam:"away_team",startsAt:"starts_at",status:"status",homeScore:"home_score",awayScore:"away_score",liveElapsed:"live_elapsed",liveStatus:"live_status",featured:"featured",video:"video",hotLocked:"hot_locked",hotWinner:"hot_winner"};for(const [k,col] of Object.entries(map))if(req.body[k]!==undefined){fields.push(`${col}=$${vals.length+1}`);vals.push(req.body[k])}if(!fields.length)return res.status(400).json({error:"Sin cambios"});fields.push("score_source=$"+(vals.length+1));vals.push("LOCAL");fields.push("score_updated_at=NOW()");vals.push(req.params.id);const {rows}=await pool.query(`UPDATE sports_events SET ${fields.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:"Evento no encontrado"});await audit(req.user.id,"UPDATE_EVENT","event",req.params.id,req.body);res.json({event:rows[0]})});
+app.patch("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{const fields=[],vals=[];const map={sport:"sport",league:"league",homeTeam:"home_team",awayTeam:"away_team",startsAt:"starts_at",status:"status",homeScore:"home_score",awayScore:"away_score",liveElapsed:"live_elapsed",liveStatus:"live_status",featured:"featured",video:"video"};for(const [k,col] of Object.entries(map))if(req.body[k]!==undefined){fields.push(`${col}=$${vals.length+1}`);vals.push(req.body[k])}if(!fields.length)return res.status(400).json({error:"Sin cambios"});fields.push("score_source=$"+(vals.length+1));vals.push("LOCAL");fields.push("score_updated_at=NOW()");vals.push(req.params.id);const {rows}=await pool.query(`UPDATE sports_events SET ${fields.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:"Evento no encontrado"});await audit(req.user.id,"UPDATE_EVENT","event",req.params.id,req.body);res.json({event:rows[0]})});
 app.delete("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{await pool.query("DELETE FROM sports_events WHERE id=$1",[req.params.id]);await audit(req.user.id,"DELETE_EVENT","event",req.params.id);res.json({ok:true})});
 app.get("/api/admin/events/:id",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query("SELECT * FROM sports_events WHERE id=$1",[req.params.id]);if(!rows[0])return res.status(404).json({error:"Evento no encontrado"});res.json({event:rows[0]})});
 app.get("/api/admin/events/:id/markets",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT m.id,m.name,m.market_type,m.status,jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at) selections FROM markets m LEFT JOIN market_selections s ON s.market_id=m.id WHERE m.event_id=$1 GROUP BY m.id ORDER BY m.created_at`,[req.params.id]);res.json({markets:rows})});
@@ -1314,8 +1156,8 @@ async function generateInternalMarketsForAllActiveEvents(){
   const {rows}=await pool.query(`
     SELECT id,external_id,status,home_team,away_team,home_score,away_score,live_elapsed
     FROM sports_events
-    WHERE COALESCE(hot_enabled,FALSE)=FALSE AND (status='LIVE'
-       OR (status='OPEN' AND starts_at>=NOW() AND starts_at<=NOW()+INTERVAL '14 days'))
+    WHERE status='LIVE'
+       OR (status='OPEN' AND starts_at>=NOW() AND starts_at<=NOW()+INTERVAL '14 days')
     ORDER BY CASE WHEN status='LIVE' THEN 0 ELSE 1 END, starts_at
     LIMIT 300
   `);
@@ -1378,104 +1220,6 @@ async function startLiveSync(){
   setInterval(run,LIVE_SYNC_INTERVAL_MS);
 }
 
-
-async function ensureHotMarket(event){
-  const key=`hot:2h2:${event.id}:winner`;
-  const mid=deterministicUuid(key);
-  await pool.query(`INSERT INTO markets(id,event_id,name,market_type,status,external_key,pricing_source,pricing_updated_at)
-    VALUES($1,$2,'Ganador 2H2','HOT_2H2','OPEN',$3,'HOT_ENGINE',NOW())
-    ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET status='OPEN',pricing_source='HOT_ENGINE',pricing_updated_at=NOW()`,
-    [mid,event.id,key]);
-  const sels=hotMarketOdds(event);
-  const seen=[];
-  for(const x of sels){
-    const sk=`${key}:${x.code}`; seen.push(sk); const sid=deterministicUuid(sk);
-    await pool.query(`INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key)
-      VALUES($1,$2,$3,$4,$5,'OPEN',$6)
-      ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET label=EXCLUDED.label,odds=EXCLUDED.odds,status='OPEN'`,
-      [sid,mid,x.label,x.code,x.odds,sk]);
-  }
-  await pool.query(`UPDATE market_selections SET status='CLOSED' WHERE market_id=$1 AND external_key IS NOT NULL AND NOT (external_key=ANY($2::text[]))`,[mid,seen]);
-  return mid;
-}
-async function createHotEvent(startsAt,sport,slot,index){
-  const pair=hotMakePair(sport,slot,index);
-  const eid=deterministicUuid(`hot:${sport}:${startsAt}:${index}:${slot}`);
-  const league=HOT_CATEGORY_LABEL+" · 2H2";
-  const stats=hotStatsFor({id:eid,live_elapsed:0,home_score:0,away_score:0});
-  await pool.query(`INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,featured,video,external_source,external_id,live_elapsed,live_status,score_source,score_confidence,hot_enabled,hot_locked,hot_stats,hot_rotation)
-    VALUES($1,$2,$3,$4,$5,$6,'OPEN',0,0,FALSE,FALSE,'HOT_ENGINE',$7,0,'Próximo HOT','HOT_ENGINE',100,TRUE,FALSE,$8,$9)
-    ON CONFLICT(id) DO NOTHING`,
-    [eid,sport,league,pair.home,pair.away,startsAt,`hot:${sport}:${startsAt}`,JSON.stringify(stats),slot]);
-  const q=await pool.query("SELECT * FROM sports_events WHERE id=$1",[eid]);
-  if(q.rows[0]) await ensureHotMarket(q.rows[0]);
-  return eid;
-}
-async function seedHotSchedule(){
-  if(!HOT_ENABLED) return {created:0};
-  const now=Date.now();
-  let created=0;
-  for(const sport of HOT_SPORTS){
-    let idx=0;
-    const start=Math.ceil(now/HOT_INTERVAL_MS)*HOT_INTERVAL_MS;
-    const end=now+HOT_ROLLING_HOURS*60*60*1000;
-    for(let t=start;t<=end;t+=HOT_INTERVAL_MS){
-      if(!hotIsAllowedStart(t,sport)) continue;
-      const slot=hotRotationSlot(t);
-      const key=`hot:${sport}:${t}`;
-      const exists=await pool.query("SELECT 1 FROM sports_events WHERE external_source='HOT_ENGINE' AND external_id=$1 LIMIT 1",[key]);
-      if(!exists.rows[0]){await createHotEvent(new Date(t).toISOString(),sport,slot,idx++);created++;}
-    }
-  }
-  return {created};
-}
-async function advanceHotEvents(){
-  if(!HOT_ENABLED) return {updated:0,closed:0};
-  const q=await pool.query(`SELECT * FROM sports_events WHERE hot_enabled=TRUE AND status IN ('OPEN','LIVE') AND starts_at<=NOW()+INTERVAL '1 minute' ORDER BY starts_at LIMIT 1000`);
-  let updated=0,closed=0;
-  for(const e of q.rows){
-    if(e.hot_locked) continue;
-    const elapsed=Math.floor((Date.now()-new Date(e.starts_at).getTime())/60000);
-    if(elapsed<0) continue;
-    const minute=Math.min(HOT_DURATION_MINUTES,elapsed);
-    const seed=hotHash(e.id.split("-").join(""));
-    let home=Number(e.home_score)||0,away=Number(e.away_score)||0;
-    // Deterministic, low-frequency scoring: at most 3 total goals/points in the short 2H2 simulation.
-    const sport=e.sport;
-    if(sport==="Fútbol" && minute>0){
-      home=Math.min(4,Math.floor(((seed%7)+minute*2)/13));
-      away=Math.min(4,Math.floor((((seed>>4)%7)+minute*2)/15));
-    }else if(sport==="Básquetbol"){
-      home=Math.min(99,Math.floor(8+minute*2.4+(seed%5)));
-      away=Math.min(99,Math.floor(7+minute*2.2+((seed>>3)%5)));
-    }else if(sport==="Béisbol"){
-      home=Math.min(8,Math.floor(((seed%8)+minute)/6));
-      away=Math.min(8,Math.floor((((seed>>5)%8)+minute)/7));
-    }else{
-      home=Math.min(3,Math.floor(((seed%5)+minute)/4));
-      away=Math.min(3,Math.floor((((seed>>5)%5)+minute)/5));
-    }
-    const stats=hotStatsFor({...e,live_elapsed:minute,home_score:home,away_score:away});
-    stats.winPct=hotWinPct(home,away,minute);
-    stats.possession[1]=100-stats.possession[0];
-    const status=minute>=HOT_DURATION_MINUTES?"CLOSED":"LIVE";
-    const liveStatus=minute>=HOT_DURATION_MINUTES?"Finalizado HOT":`En vivo HOT · ${minute}'`;
-    await pool.query(`UPDATE sports_events SET status=$1,home_score=$2,away_score=$3,live_elapsed=$4,live_status=$5,score_source='HOT_ENGINE',score_confidence=100,score_updated_at=NOW(),hot_stats=$6 WHERE id=$7`,
-      [status,home,away,minute,liveStatus,JSON.stringify(stats),e.id]);
-    const latest={...e,home_score:home,away_score:away,live_elapsed:minute,hot_stats:stats,status};
-    await ensureHotMarket(latest);
-    updated++;
-    if(status==="CLOSED") closed++;
-  }
-  const seeded=await seedHotSchedule();
-  return {updated,closed,created:seeded.created};
-}
-async function startHotEngine(){
-  if(!HOT_ENABLED) return;
-  try{await seedHotSchedule();await advanceHotEvents();}catch(e){console.error("HOT bootstrap:",e.message)}
-  setInterval(async()=>{try{await advanceHotEvents()}catch(e){console.error("HOT cycle:",e.message)}},60*1000);
-}
-
 let dbReady=false;
 // Compatibility alias: /api/heath -> /api/health (common typo; keeps diagnostics accessible).
 app.get("/api/heath",async(req,res)=>{
@@ -1507,7 +1251,7 @@ app.get("/api/health",async(req,res)=>{
         apiFootballOptional:true,
         source:"BETLIVE_ENGINE"
       },
-      hotEngine:{enabled:HOT_ENABLED,intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00"},databaseState:{
+      databaseState:{
         activeEvents:events.rows[0].n,
         liveEvents:live.rows[0].n,
         openInternalMarkets:markets.rows[0].n,
@@ -1569,5 +1313,4 @@ app.get("/{*splat}",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
 app.listen(PORT,()=>{console.log("BetLive API escuchando en "+PORT);dbInit().then(async()=>{
   await ensureBootstrapAdmin();dbReady=true;console.log("Base de datos inicializada correctamente");
   startLiveSync();
-  startHotEngine();
 }).catch(e=>console.error("Error inicializando la base de datos:",e))});
