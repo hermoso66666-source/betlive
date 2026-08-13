@@ -1,1 +1,3 @@
-BetLive Resilient Score + Independent Market Engine v5
+BetLive Resilient Score + Market Engine v6
+Score feed: failover API-Football -> backup -> BetLive DB/local
+Market feed: independent BetLive engine
