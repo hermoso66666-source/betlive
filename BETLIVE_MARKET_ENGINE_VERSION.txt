@@ -1,3 +1,1 @@
-BetLive Resilient Score + Market Engine v6
-Score feed: failover API-Football -> backup -> BetLive DB/local
-Market feed: independent BetLive engine
+BetLive Resilient Score + Market Engine v8 — OPEN→LIVE reconciliation

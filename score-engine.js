@@ -14,20 +14,21 @@ function canonicalEventKey(x) {
   const bucket=Math.floor(starts.getTime()/(6*60*60*1000));
   return `${clean(x.sport,'football').toLowerCase()}:${home}:${away}:${bucket}`.slice(0,220);
 }
-function fromApiFootball(payload) {
+function fromApiFootball(payload, options={}) {
+  const forceLive=Boolean(options.forceLive);
   const rows=Array.isArray(payload?.response) ? payload.response : [];
   return rows.map(f=>({
     externalId: f?.fixture?.id ? String(f.fixture.id) : null,
     sport: 'Fútbol', league: clean(f?.league?.name,'Fútbol'),
     home: clean(f?.teams?.home?.name), away: clean(f?.teams?.away?.name),
     startsAt: f?.fixture?.date || new Date().toISOString(),
-    status: normalizeStatus(f?.fixture?.status?.short),
+    status: (forceLive && !['FT','AET','PEN','CANC','PST','ABD','AWD','WO'].includes(String(f?.fixture?.status?.short||'').toUpperCase())) ? 'LIVE' : normalizeStatus(f?.fixture?.status?.short),
     homeScore: num(f?.goals?.home), awayScore: num(f?.goals?.away),
     elapsed: num(f?.fixture?.status?.elapsed,0), liveStatus: clean(f?.fixture?.status?.long), confidence: 95
   })).filter(x=>x.home&&x.away);
 }
-function normalizeScoreFeed(payload, source='GENERIC') {
-  if(source==='API_FOOTBALL') return fromApiFootball(payload);
+function normalizeScoreFeed(payload, source='GENERIC', options={}) {
+  if(source==='API_FOOTBALL') return fromApiFootball(payload, options);
   const raw=Array.isArray(payload) ? payload : Array.isArray(payload?.events) ? payload.events : Array.isArray(payload?.fixtures) ? payload.fixtures : [];
   return raw.map(x=>({
     externalId: clean(x.externalId || x.id || x.fixtureId, '' ) || null,
