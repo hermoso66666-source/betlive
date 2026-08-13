@@ -28,7 +28,20 @@ const HOT_PLAYER_NAMES=[
 "Leandro Vela","Mauricio Tapia","Nicolás Roldán","Orlando Paz","Pascual Moya","Rodrigo Beltrán","Simón Aguirre","Tristán Paredes","Valentín Mora","Yago Herrera"
 ];
 const HOT_PLAYER_ALIASES=["Madness","Tom","Blaze","Raptor","Nova","Flash","Titan","Ghost","Fury","Ace","Storm","Viper","Rocket","Shadow","Wolf","Cobra","Joker","Phoenix","Zero","Legend"];
-function hotHash(n){let x=Math.abs(Math.sin(Number(n)+17)*1000000);return Math.floor(x);}
+function hotHash(value){
+  // Deterministic hash that accepts both numeric seeds and UUID/string IDs.
+  // Number("uuid") becomes NaN, which previously propagated into PostgreSQL integer fields.
+  if(typeof value === "number" && Number.isFinite(value)){
+    return Math.floor(Math.abs(Math.sin(value+17)*1000000));
+  }
+  const str=String(value??"");
+  let h=2166136261;
+  for(let i=0;i<str.length;i++){
+    h^=str.charCodeAt(i);
+    h=Math.imul(h,16777619);
+  }
+  return h>>>0;
+}
 function hotRotationSlot(date){return Math.floor(new Date(date).getTime()/(HOT_ROTATION_HOURS*60*60*1000));}
 function hotPlayer(slot,index){
   const i=(hotHash(slot*97+index*31))%HOT_PLAYER_NAMES.length;
@@ -1439,7 +1452,8 @@ async function advanceHotEvents(){
     if(elapsed<0) continue;
     const minute=Math.min(HOT_DURATION_MINUTES,elapsed);
     const seed=hotHash(e.id.split("-").join(""));
-    let home=Number(e.home_score)||0,away=Number(e.away_score)||0;
+    let home=Number.isFinite(Number(e.home_score))?Math.trunc(Number(e.home_score)):0;
+    let away=Number.isFinite(Number(e.away_score))?Math.trunc(Number(e.away_score)):0;
     // Deterministic, low-frequency scoring: at most 3 total goals/points in the short 2H2 simulation.
     const sport=e.sport;
     if(sport==="Fútbol" && minute>0){
@@ -1490,6 +1504,7 @@ app.get("/api/health",async(req,res)=>{
       pool.query("SELECT COUNT(*)::int n FROM markets WHERE market_type='INTERNAL_LEV' AND status='OPEN'"),
       pool.query("SELECT COUNT(*)::int n FROM market_selections s JOIN markets m ON m.id=s.market_id WHERE m.market_type='INTERNAL_LEV' AND m.status='OPEN' AND s.status='OPEN'")
     ]);
+    const hotState=(await pool.query(`SELECT COUNT(*) FILTER(WHERE hot_enabled=TRUE)::int total,COUNT(*) FILTER(WHERE hot_enabled=TRUE AND status='LIVE')::int live,COUNT(*) FILTER(WHERE hot_enabled=TRUE AND status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE hot_enabled=TRUE AND status='CLOSED')::int closed,COUNT(*) FILTER(WHERE hot_enabled=TRUE AND home_score IS NULL)::int nullScores FROM sports_events`)).rows[0];
     const lastRunMs=liveSyncState.lastRunAt?Date.now()-new Date(liveSyncState.lastRunAt).getTime():null;
     res.status(200).json({
       ok:true,
@@ -1507,7 +1522,7 @@ app.get("/api/health",async(req,res)=>{
         apiFootballOptional:true,
         source:"BETLIVE_ENGINE"
       },
-      hotEngine:{enabled:HOT_ENABLED,intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00"},databaseState:{
+      hotEngine:{enabled:HOT_ENABLED,intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00",database:hotState},databaseState:{
         activeEvents:events.rows[0].n,
         liveEvents:live.rows[0].n,
         openInternalMarkets:markets.rows[0].n,
