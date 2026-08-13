@@ -957,7 +957,7 @@ async function generateInternalLEV(event, prediction=null){
   // Aggregate exposure from existing pending tickets. This is market-wide only;
   // it is never personalized per player.
   const betting=await getEventBettingTotals(event.id);
-  const existing=await pool.query(`SELECT id,code FROM market_selections s JOIN markets m ON m.id=s.market_id WHERE m.event_id=$1 AND m.market_type='INTERNAL_LEV'`,[event.id]);
+  const existing=await pool.query(`SELECT s.id,s.code FROM market_selections s JOIN markets m ON m.id=s.market_id WHERE m.event_id=$1 AND m.market_type='INTERNAL_LEV'`,[event.id]);
   const totals={homeAmount:0,drawAmount:0,awayAmount:0};
   for(const r of existing.rows){
     const amount=betting.get(String(r.id))||0;
