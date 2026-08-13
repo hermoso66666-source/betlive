@@ -9,7 +9,7 @@ import pg from "pg";
 import path from "path";
 import {fileURLToPath} from "url";
 import { generateLEVMarket } from "./lev-engine.js";
-import { normalizeScoreFeed, chooseScoreSnapshot, canonicalEventKey } from "./score-engine.js";
+import { normalizeScoreFeed, normalizeEspnScoreboard, chooseScoreSnapshot, canonicalEventKey } from "./score-engine.js";
 
 const {Pool}=pg;
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
@@ -39,6 +39,10 @@ const SCORE_BACKUP_URL=String(process.env.SCORE_BACKUP_URL||"").trim().replace(/
 const SCORE_BACKUP_TOKEN=String(process.env.SCORE_BACKUP_TOKEN||"").trim();
 const SCORE_BACKUP_TIMEOUT_MS=Math.max(1500,Math.min(10000,Number(process.env.SCORE_BACKUP_TIMEOUT_MS||4000)));
 const SCORE_STALE_GRACE_MS=Math.max(60*1000,Number(process.env.SCORE_STALE_GRACE_MS||10*60*1000));
+const ESPN_BACKUP_ENABLED=String(process.env.ESPN_BACKUP_ENABLED??"true").toLowerCase()!=="false";
+const ESPN_BACKUP_TIMEOUT_MS=Math.max(1500,Math.min(8000,Number(process.env.ESPN_BACKUP_TIMEOUT_MS||4500)));
+const ESPN_BACKUP_DAYS=Math.max(0,Math.min(7,Number(process.env.ESPN_BACKUP_DAYS||3)));
+const ESPN_SOCCER_LEAGUES=String(process.env.ESPN_SOCCER_LEAGUES||"mex.1,eng.1,esp.1,ita.1,ger.1,fra.1,uefa.champions").split(",").map(x=>x.trim()).filter(Boolean);
 let apiFootballQuota={remaining:null,limit:null,lastRequestAt:0,lastResponseAt:null,pausedUntil:0};
 const authLimiter=rateLimit({windowMs:15*60*1000,max:40,standardHeaders:true,legacyHeaders:false});
 const ticketLimiter=rateLimit({windowMs:60*1000,max:20,standardHeaders:true,legacyHeaders:false});
@@ -543,25 +547,67 @@ app.get("/api/events/upcoming-real",async(req,res)=>{
   try{
     const force=String(req.query.refresh||"")==="1";
     const fresh=!force && upcomingSyncState.lastSuccessAt && (Date.now()-upcomingSyncState.lastSuccessAt)<UPCOMING_CACHE_MS;
-    let sync=upcomingSyncState.lastResult;
+    let sync=upcomingSyncState.lastResult||null;
     let providerError=null;
-    if(API_FOOTBALL_KEY && !fresh){
-      try{
-        upcomingSyncState.lastAttemptAt=Date.now();
-        sync=await syncUpcomingOdds(3);
-        upcomingSyncState={lastSuccessAt:Date.now(),lastAttemptAt:upcomingSyncState.lastAttemptAt,lastResult:sync,lastError:null};
-      }catch(e){
-        providerError=e.message;
-        upcomingSyncState.lastError=e.message;
-        console.warn("upcoming-real provider unavailable; using BetLive DB:",e.message);
+    let sourceParts=[];
+    if(!fresh){
+      upcomingSyncState.lastAttemptAt=Date.now();
+      // Primary provider: API-Football. It is optional and may be rate-limited.
+      if(API_FOOTBALL_KEY){
+        try{
+          sync=await syncUpcomingOdds(3);
+          sourceParts.push("API_FOOTBALL");
+          if(!sync.fixtures) providerError="API-Football devolvió 0 próximos partidos";
+        }catch(e){
+          providerError=e.message;
+          console.warn("upcoming-real primary unavailable:",e.message);
+        }
+      }else{
+        providerError="API-Football no configurada";
       }
+
+      // Independent fallback: generic backup (if configured) + keyless ESPN.
+      // We only use it when the primary is unavailable/empty, so it cannot
+      // overwrite a healthy primary feed.
+      if(providerError || !sync?.fixtures){
+        try{
+          const backup=await fetchBackupScoreFeed({days:ESPN_BACKUP_DAYS});
+          const backupEvents=await applyScoreFeed(backup.events,"BACKUP");
+          if(backupEvents>0){
+            sourceParts.push(backup.source);
+            sync={...(sync||{}),backupEvents,backupRequests:backup.requests,backupErrors:backup.errors};
+            providerError=null;
+          }else if(backup.errors?.length){
+            sync={...(sync||{}),backupEvents:0,backupRequests:backup.requests,backupErrors:backup.errors};
+          }
+        }catch(e){
+          sync={...(sync||{}),backupEvents:0,backupError:e.message};
+        }
+      }
+
+      upcomingSyncState={
+        lastSuccessAt:Date.now(),
+        lastAttemptAt:upcomingSyncState.lastAttemptAt,
+        lastResult:sync,
+        lastError:providerError
+      };
     }
+    // Markets are generated independently from the event feed.
     await generateInternalMarketsForAllActiveEvents();
     const rows=await queryUpcomingEvents();
-    res.json({events:rows,source:API_FOOTBALL_KEY&&!providerError?"API_FOOTBALL+BETLIVE":"BETLIVE",cached:fresh||Boolean(providerError),sync,cacheMs:UPCOMING_CACHE_MS,error:providerError});
+    const source=sourceParts.length?`${sourceParts.join("+")}+BETLIVE`:"BETLIVE";
+    res.json({
+      events:rows,
+      source,
+      cached:fresh,
+      sync,
+      cacheMs:UPCOMING_CACHE_MS,
+      error:providerError,
+      fallback:{enabled:ESPN_BACKUP_ENABLED,provider:"ESPN",leagues:ESPN_SOCCER_LEAGUES}
+    });
   }catch(e){
     console.error("upcoming-real",e);
-    try{const rows=await queryUpcomingEvents(); return res.json({events:rows,source:"BETLIVE",cached:true,error:e.message});}
+    try{const rows=await queryUpcomingEvents(); return res.json({events:rows,source:"BETLIVE",cached:true,error:e.message,fallback:{enabled:ESPN_BACKUP_ENABLED,provider:"ESPN"}});}
     catch{res.status(502).json({error:e.message||"No se pudieron cargar partidos"})}
   }
 });
@@ -829,7 +875,7 @@ let liveSyncRunning=false;
 let liveSyncState={lastRunAt:null,lastSuccessAt:null,fixtures:0,odds:0,markets:0,selections:0,internalMarkets:0,error:null,configured:Boolean(API_FOOTBALL_KEY),scoreSource:"BETLIVE_DB",scoreSources:{apiFootball:false,backup:false,local:false}};
 let marketRunState={lastRunAt:null,lastSuccessAt:null,activeEvents:0,liveEvents:0,internalMarkets:0,errors:0,lastError:null};
 
-async function fetchBackupScoreFeed(){
+async function fetchGenericBackupScoreFeed(){
   if(!SCORE_BACKUP_URL) return {events:[],source:"BACKUP_NOT_CONFIGURED"};
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),SCORE_BACKUP_TIMEOUT_MS);
@@ -839,8 +885,92 @@ async function fetchBackupScoreFeed(){
     const r=await fetch(SCORE_BACKUP_URL,{headers,signal:controller.signal});
     if(!r.ok) throw new Error(`backup score feed HTTP ${r.status}`);
     const data=await r.json();
-    return {events:normalizeScoreFeed(data),source:"BACKUP"};
+    return {events:normalizeScoreFeed(data,"BACKUP"),source:"BACKUP"};
   }finally{clearTimeout(timer)}
+}
+
+async function fetchEspnSoccerFeed({days=0}={}){
+  if(!ESPN_BACKUP_ENABLED) return {events:[],source:"ESPN_DISABLED",requests:0,errors:[]};
+  const dates=[];
+  const startDate=new Date();
+  startDate.setUTCHours(0,0,0,0);
+  for(let d=0;d<=days;d++){
+    const date=new Date(startDate.getTime()+d*86400000);
+    dates.push(date.toISOString().slice(0,10).replace(/-/g,""));
+  }
+
+  const jobs=[];
+  for(const league of ESPN_SOCCER_LEAGUES){
+    for(const date of dates) jobs.push({league,date});
+  }
+
+  const events=[];
+  const errors=[];
+  let requests=0;
+  // Run a small number concurrently: much faster than sequential requests,
+  // while avoiding a burst of dozens of connections on every fallback cycle.
+  const concurrency=6;
+  for(let i=0;i<jobs.length;i+=concurrency){
+    const batch=jobs.slice(i,i+concurrency);
+    const results=await Promise.all(batch.map(async({league,date})=>{
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),ESPN_BACKUP_TIMEOUT_MS);
+      try{
+        const url=`https://site.api.espn.com/apis/site/v2/sports/soccer/${encodeURIComponent(league)}/scoreboard?dates=${date}`;
+        const r=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});
+        if(!r.ok) throw new Error(`ESPN ${league} HTTP ${r.status}`);
+        const data=await r.json();
+        return {league,events:normalizeEspnScoreboard(data,league),error:null};
+      }catch(e){
+        return {league,events:[],error:`${league}/${date}: ${e.message}`};
+      }finally{clearTimeout(timer)}
+    }));
+    requests+=batch.length;
+    for(const result of results){
+      events.push(...result.events);
+      if(result.error) errors.push(result.error);
+    }
+  }
+
+  const byKey=new Map();
+  for(const e of events){
+    const key=canonicalEventKey(e)||`${e.home}|${e.away}|${e.startsAt}`;
+    const prior=byKey.get(key);
+    if(!prior || Number(e.confidence)>Number(prior.confidence)) byKey.set(key,e);
+  }
+  return {events:[...byKey.values()],source:"ESPN",requests,errors};
+}
+
+async function fetchBackupScoreFeed({days=0}={}){
+  const parts=[];
+  let genericError=null;
+  if(SCORE_BACKUP_URL){
+    try{
+      const generic=await fetchGenericBackupScoreFeed();
+      if(generic.events?.length) parts.push(generic);
+    }catch(e){genericError=e.message}
+  }
+  // ESPN is the automatic keyless fallback. If a custom backup already
+  // returned events, skip the extra network work for better response time.
+  if(!parts.length){
+    try{
+      const espn=await fetchEspnSoccerFeed({days});
+      parts.push(espn);
+    }catch(e){parts.push({events:[],source:"ESPN",requests:0,errors:[e.message]})}
+  }
+  const all=parts.flatMap(x=>x.events||[]);
+  const byKey=new Map();
+  for(const e of all){
+    const key=canonicalEventKey(e)||`${e.home}|${e.away}|${e.startsAt}`;
+    const prior=byKey.get(key);
+    if(!prior || Number(e.confidence)>Number(prior.confidence)) byKey.set(key,e);
+  }
+  return {
+    events:[...byKey.values()],
+    source:parts.map(x=>x.source).filter(Boolean).join("+")||"NO_BACKUP",
+    requests:parts.reduce((n,x)=>n+(x.requests||0),0),
+    errors:[genericError,...parts.flatMap(x=>x.errors||[])].filter(Boolean)
+  };
 }
 
 async function upsertCanonicalScoreEvent(item,source){
@@ -903,7 +1033,7 @@ async function syncScoreProviders(){
   }
   // Backup is used when primary failed OR returned no live fixtures.
   if(SCORE_BACKUP_URL && (!apiOk || apiEvents===0)){
-    try{const b=await fetchBackupScoreFeed();backupEvents=await applyScoreFeed(b.events,"BACKUP");backupOk=true;}catch(e){backupError=e.message;console.warn("Backup score feed unavailable:",e.message)}
+    try{const b=await fetchBackupScoreFeed({days:0});backupEvents=await applyScoreFeed(b.events,b.source.includes("ESPN")?"BACKUP":"BACKUP");backupOk=b.events.length>0;if(!b.events.length && b.errors?.length) backupError=b.errors.slice(0,3).join(" | ");}catch(e){backupError=e.message;console.warn("Backup score feed unavailable:",e.message)}
   }
   await preserveLocalLiveState();
   const local=(await pool.query("SELECT COUNT(*)::int n FROM sports_events WHERE status='LIVE' AND score_source IN ('LOCAL','STALE_CACHE')")).rows[0]?.n||0;
@@ -1273,7 +1403,7 @@ app.get("/api/health",async(req,res)=>{
     res.status(200).json({ok:true,database:dbReady,error:e.message,marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent"},live:{enabled:LIVE_SYNC_ENABLED,intervalMs:LIVE_SYNC_INTERVAL_MS,state:liveSyncState}});
   }
 });
-app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,scoreEngine:{mode:"failover",apiFootball:Boolean(API_FOOTBALL_KEY),backup:Boolean(SCORE_BACKUP_URL),staleGraceMs:SCORE_STALE_GRACE_MS},marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent",apiFootballOptional:true},configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,apiQuota:apiFootballQuota,...liveSyncState}));
+app.get("/api/live/status",(req,res)=>res.json({enabled:LIVE_SYNC_ENABLED,scoreEngine:{mode:"failover",apiFootball:Boolean(API_FOOTBALL_KEY),backup:Boolean(SCORE_BACKUP_URL)||ESPN_BACKUP_ENABLED,espnBackup:ESPN_BACKUP_ENABLED,staleGraceMs:SCORE_STALE_GRACE_MS},marketEngine:{enabled:INTERNAL_LEV_ENABLED,mode:"independent",apiFootballOptional:true},configured:Boolean(API_FOOTBALL_KEY),intervalMs:LIVE_SYNC_INTERVAL_MS,apiQuota:apiFootballQuota,...liveSyncState}));
 app.post("/api/market-engine/run",async(req,res)=>{
   try{
     const result=await generateInternalMarketsForAllActiveEvents();

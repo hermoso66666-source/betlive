@@ -50,3 +50,9 @@ Resultado: `FAILOVER SIMULATION: PASS`.
 ## Nota de precisión
 
 Si todas las fuentes deportivas están caídas, BetLive puede mantener el último marcador válido y generar un mercado base, pero **no puede inventar un marcador real**. Para dinero real, un estado sin verificación debe poder marcarse como obsoleto/suspenderse hasta que vuelva una fuente confiable.
+
+
+## V12 — Respaldo automático sin API key
+Si API-Football falla, devuelve cero eventos o está pausada por rate-limit, el endpoint de próximos partidos intenta `SCORE_BACKUP_URL` y después ESPN Soccer público. ESPN no aporta cuotas: únicamente eventos/estado/marcador; las cuotas siguen siendo responsabilidad de `INTERNAL_LEV`.
+
+El fallback ESPN está habilitado por defecto y se configura con `ESPN_BACKUP_ENABLED`, `ESPN_BACKUP_DAYS`, `ESPN_BACKUP_TIMEOUT_MS` y `ESPN_SOCCER_LEAGUES`.
