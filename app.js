@@ -40,7 +40,7 @@ function render(){
       <div class="event" style="padding-top:0"><span></span><div class="team">${escapeHtml(m.away)}<small>${m.score[1]}</small></div></div>
       ${marketHtml||'<div class="empty">Sin mercados disponibles en este momento.</div>'}
     </article>`;
-  }).join("")||(liveOnly?"<div class=empty>🔴 No hay partidos reales en vivo en este momento. Cuando API-Football detecte un partido en directo aparecerá aquí automáticamente.</div>":"<div class=empty>No hay eventos disponibles.</div>");
+  }).join("")||(liveOnly?"<div class=empty>🔴 No hay partidos en vivo disponibles en este momento.</div>":"<div class=empty>No hay eventos disponibles.</div>");
   $$('.odd').forEach(b=>b.onclick=()=>pickSelection(b.dataset.id,b.dataset.sid));
   renderSlip()
 }
