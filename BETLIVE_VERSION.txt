@@ -1,1 +1,4 @@
-BetLive V26 — Verified Market Engine V2
+BetLive V27 FINAL DESIGN
+Base: BetLive_V26_VERIFIED_MARKETS
+Visual update: supplied definitive BetLive logo + supplied desktop/mobile design reference
+Functional JavaScript preserved; only public visual layer and asset paths were updated.
