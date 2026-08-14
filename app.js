@@ -7,39 +7,54 @@ function normalizeEvents(events){return events.map(e=>{
   return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,hotStats:e.hot_stats||null,raceStats:e.race_stats||null,hot:e.hot_enabled===true||String(e.external_source||"").startsWith("HOT_")||e.external_source==="HOT_ENGINE",race:e.race_enabled===true||e.external_source==="RACE_ENGINE",markets,odds}
 })}
 async function loadEvents(forceLive=true){
+  const requestedSport=sport;
   try{
-    hotMode=false;raceMode=false;feedMode=forceLive?"live":"all";liveOnly=forceLive;
+    hotMode=false;raceMode=false;liveOnly=forceLive;
     const virtualSports=["Básquetbol","Béisbol","Tenis","Hockey"];
     let events=[];
-    if(sport==="Todos"){
-      // Independent modules: one failed virtual sport must not break the rest of the catalog.
+    // Never use the global football feed for virtual sports. Each module has its own endpoint.
+    if(requestedSport==="Todos"){
+      feedMode="catalog";
       const results=await Promise.allSettled([
-        api(`/api/events?live=${forceLive}`),
-        ...virtualSports.map(x=>api(`/api/virtual/${encodeURIComponent(x)}?live=${forceLive}`))
+        api('/api/events?live=true'),
+        api('/api/virtual/all?live=false')
       ]);
       events=results.filter(r=>r.status==="fulfilled").flatMap(r=>r.value?.events||[]);
-      if(!results.some(r=>r.status==="fulfilled")) throw new Error("No se pudo cargar ningún motor");
-    }else if(virtualSports.includes(sport)){
-      const d=await api(`/api/virtual/${encodeURIComponent(sport)}?live=${forceLive}`);
+      if(!events.length && results.every(r=>r.status!=="fulfilled")) throw new Error("No se pudo cargar ningún motor");
+    }else if(virtualSports.includes(requestedSport)){
+      feedMode="virtual";
+      // Virtual categories show their own OPEN/LIVE stream; they do not wait for real live data.
+      const d=await api(`/api/virtual/${encodeURIComponent(requestedSport)}?live=false`);
       events=d.events||[];
-    }else if(sport==="Fútbol"){
-      // Only this branch touches the real football/API-Football event feed.
-      const d=await api(`/api/events?live=${forceLive}`);
+    }else if(requestedSport==="Fútbol"){
+      feedMode="football";
+      const d=await api('/api/events?live=true');
       events=d.events||[];
     }else{
-      events=[];
+      feedMode="catalog";
     }
-    M=normalizeEvents(events);$("#viewTitle").textContent=sport==="Todos"?(forceLive?"🔴 EN VIVO AHORA":"EVENTOS"):`${forceLive?"🔴":"📅"} ${sport}`;$("#feedNotice").classList.add("hidden");render();
-  }catch(e){toast(e.message)}
+    // Ignore late responses from a previous category click.
+    if(sport!==requestedSport) return;
+    M=normalizeEvents(events);
+    $("#viewTitle").textContent=requestedSport==="Todos"?"🔴 EN VIVO + VIRTUALES":` ${requestedSport}`.trim();
+    $("#feedNotice").classList.add("hidden");
+    render();
+  }catch(e){
+    if(sport!==requestedSport)return;
+    M=[];
+    $("#count").textContent="0 eventos";
+    $("#matches").innerHTML=`<div class="empty">No se pudo cargar <b>${escapeHtml(requestedSport)}</b>.<br><small>${escapeHtml(e.message)}</small></div>`;
+    toast(e.message);
+  }
 }
 async function loadUpcoming(){try{hotMode=false;raceMode=false;feedMode="upcoming";liveOnly=false;$("#matches").innerHTML="<div class=empty>Cargando partidos reales...</div>";const d=await api("/api/events/upcoming-real");M=normalizeEvents(d.events);$("#viewTitle").textContent="📅 PRÓXIMOS PARTIDOS";const src=d.source||"BETLIVE";$("#feedNotice").textContent=d.error?`BetLive conserva los partidos disponibles. Fuente adicional no disponible: ${d.error}`:`Fuente: ${src}. Los mercados internos de BetLive no dependen de las cuotas externas.`;$("#feedNotice").classList.remove("hidden");render()}catch(e){$("#matches").innerHTML=`<div class=empty>No se pudieron cargar los próximos partidos.<br><small>${escapeHtml(e.message)}</small><br><button id="retryUpcoming" class="red" style="margin-top:12px">Reintentar</button></div>`;const b=$("#retryUpcoming");if(b)b.onclick=loadUpcoming;toast(e.message)}}
 async function loadHot(live=true){
   try{
-    hotMode=true;raceMode=false;feedMode=live?"hot-live":"hot-upcoming";liveOnly=live;
+    hotMode=true;raceMode=false;feedMode="hot";liveOnly=false;
     $("#events").classList.remove("hidden");$("#bets").classList.add("hidden");
     $("#matches").innerHTML="<div class=empty>Cargando HOT 2H2...</div>";
-    const d=await api(live?"/api/events/hot?live=true":"/api/events/hot/upcoming");
-    M=normalizeEvents(d.events);$("#viewTitle").textContent=live?"🔥 HOT 2H2 · EN VIVO":"🔥 HOT 2H2 · PRÓXIMOS";
+    const d=await api('/api/events/hot?live=false');
+    M=normalizeEvents(d.events);$("#viewTitle").textContent="🔥 HOT 2H2";
     $("#feedNotice").textContent="🔥 HOT · partidos 2H2 de 8 minutos. Cada evento usa personajes y datos propios de la categoría HOT.";if(d.warning)$("#feedNotice").textContent+=" · Motor: "+d.warning;
     $("#feedNotice").classList.remove("hidden");render();
   }catch(e){$("#matches").innerHTML=`<div class=empty>No se pudo cargar HOT 2H2.<br><small>${escapeHtml(e.message)}</small><br><button id="retryHot" class="red" style="margin-top:12px">Reintentar</button></div>`;$("#retryHot")?.addEventListener("click",()=>loadHot(live));toast(e.message)}
@@ -121,7 +136,14 @@ $("#register").onclick=async()=>{try{let n=$("#rn").value.trim(),c=$("#rc").valu
 $("#login").onclick=async()=>{try{let d=await api("/api/auth/login",{method:"POST",body:JSON.stringify({identifier:$("#lc").value.trim(),password:$("#lp").value})});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Sesión iniciada ✓")}catch(e){toast(e.message)}};
 $$('[data-oauth]').forEach(b=>b.onclick=()=>{ window.location.href="/api/auth/google?action=login"; });
 $$('[data-link-oauth]').forEach(b=>b.onclick=()=>{ const provider=b.dataset.linkOauth; if(provider==="google") window.location.href="/api/auth/google?action=link"; });
-setInterval(()=>{if(document.visibilityState!=="visible")return;if(hotMode)loadHot(liveOnly);else if(raceMode)loadRaces(!liveOnly);else if(["live","all"].includes(feedMode))loadEvents(liveOnly)},15000);
+setInterval(()=>{
+  if(document.visibilityState!=="visible")return;
+  if(hotMode)return loadHot(false);
+  if(raceMode)return loadRaces(false);
+  if(feedMode==="virtual")return loadEvents(false);
+  if(feedMode==="football")return loadEvents(true);
+  if(feedMode==="catalog")return loadEvents(true);
+},15000);
 renderSlip();
 
 let supportTimer=null;
