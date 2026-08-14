@@ -5,7 +5,7 @@ async function api(url,opt={}){let r=await fetch(url,{credentials:"same-origin",
 function normalizeEvents(events){return events.map(e=>{
   const markets=(e.markets||[]).map(m=>({...m,selections:(m.selections||[]).map(s=>({...s,odds:Number(s.odds)}))}));
   const odds=markets.flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})));
-  return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,durationSeconds:Number(e.sim_duration_seconds||e.duration_seconds||0)||0,hotStats:e.hot_stats||null,raceStats:e.race_stats||null,hot:e.hot_enabled===true||String(e.external_source||"").startsWith("HOT_")||e.external_source==="HOT_ENGINE",race:e.race_enabled===true||e.external_source==="RACE_ENGINE",markets,odds}
+  return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,hotStats:e.hot_stats||null,raceStats:e.race_stats||null,hot:e.hot_enabled===true||String(e.external_source||"").startsWith("HOT_")||e.external_source==="HOT_ENGINE",race:e.race_enabled===true||e.external_source==="RACE_ENGINE",markets,odds}
 })}
 async function loadEvents(forceLive=true){
   const requestedSport=sport;
@@ -79,44 +79,16 @@ async function loadTickets(mode="all"){
 }
 const escapeHtml=v=>String(v??"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 
-function isSimulatedEvent(m){return m.hot||m.race||String(m.source||"").startsWith("HOT_")||m.source==="RACE_ENGINE"}
-function gameClock(m){
-  if(!isSimulatedEvent(m))return null;
-  const duration=Math.max(1,Number(m.durationSeconds)||480),start=Date.parse(m.startsAt||"");
-  if(!Number.isFinite(start))return {elapsed:0,duration,display:"00:00",live:false,finished:m.status==="CLOSED"};
-  const raw=Math.floor((Date.now()-start)/1000),elapsed=Math.max(0,Math.min(duration,raw));
-  const live=raw>=0&&raw<duration&&m.status!=="CLOSED",finished=m.status==="CLOSED"||raw>=duration,shown=finished?duration:elapsed;
-  return {elapsed:shown,duration,display:`${String(Math.floor(shown/60)).padStart(2,"0")}:${String(shown%60).padStart(2,"0")}`,live,finished};
-}
-function updateSimulatedClocks(){
-  $$('.sim-clock').forEach(el=>{const m=M.find(x=>x.id===el.dataset.eventId);if(!m)return;const c=gameClock(m);if(!c)return;el.textContent=c.finished?`FINAL · ${c.display}`:`${c.live?'EN VIVO · ':''}${c.display}`;});
-}
-async function refreshMarketsOnly(){
-  if(document.visibilityState!=="visible"||eventsLoading||!M.length)return;
-  try{
-    const d=await api(`/api/markets/refresh?ids=${encodeURIComponent(M.map(x=>x.id).filter(Boolean).join(','))}`),byEvent=new Map();
-    for(const row of (d.markets||[])){
-      if(!byEvent.has(row.event_id))byEvent.set(row.event_id,[]);
-      const markets=byEvent.get(row.event_id);let mk=markets.find(x=>x.id===row.market_id);
-      if(!mk){mk={id:row.market_id,name:row.name,type:row.market_type,status:row.market_status,selections:[]};markets.push(mk);}
-      mk.selections.push({id:row.selection_id,code:row.code,label:row.label,odds:Number(row.odds),status:row.selection_status});
-    }
-    for(const m of M){if(byEvent.has(m.id)){const fresh=byEvent.get(m.id);m.markets=fresh;m.odds=fresh.flatMap(x=>(x.selections||[]).map(s=>({id:s.id,label:`${x.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:x.name,marketId:x.id})));}}
-    $$('.odd').forEach(btn=>{
-      const m=M.find(x=>x.id===btn.dataset.id),sel=m?.markets?.flatMap(x=>x.selections||[]).find(x=>x.id===btn.dataset.sid);if(!sel)return;
-      const label=btn.querySelector('small'),value=btn.querySelector('b');if(label)label.innerHTML=escapeHtml(sel.label);if(value)value.innerHTML=displayOdds(sel.odds);
-      btn.disabled=sel.status!=="OPEN"||m.status==="CLOSED";btn.classList.toggle('sel',slip.some(x=>x.selectionId===sel.id));
-      const chosen=slip.find(x=>x.selectionId===sel.id);if(chosen)chosen.odd=Number(sel.odds);
-    });
-    renderSlip();
-  }catch(e){console.warn("Market-only refresh:",e.message)}
-}
 function render(){
   let q=$("#search").value.toLowerCase(),a=M.filter(m=>(hotMode?m.hot:(raceMode?m.race:(sport==="Todos"||m.sport===sport)))&&(!q||(`${m.home} ${m.away} ${m.league}`).toLowerCase().includes(q))).filter(m=>filter==="all"||filter==="featured"&&m.featured||filter==="video"&&m.video||filter==="goals"&&(m.score[0]+m.score[1]>0));
   $("#count").textContent=a.length+" eventos";
   $("#matches").innerHTML=a.map(m=>{
     const isLive=m.status==="LIVE";
-    const clock=gameClock(m); const time=clock?(clock.live?`🔴 EN VIVO · ${clock.display}`:(clock.finished?`FINAL · ${clock.display}`:`PRÓXIMO · ${clock.display}`)):(isLive?(m.liveStatus?`${m.liveStatus}${m.liveElapsed!=null?` · ${m.liveElapsed}'`:""}`:"● EN VIVO"):(m.status==="OPEN"?"● PRÓXIMO":"● CERRADO"));
+    const simulated=m.hot===true || m.race===true;
+    const durationSec=simulated?(m.hot?480:300):5400;
+    const elapsedSec=simulated && m.startsAt?Math.max(0,Math.min(durationSec,Math.floor((Date.now()-new Date(m.startsAt).getTime())/1000))):null;
+    const gameClock=isLive && simulated?`<span class="game-clock" data-game-clock data-start-ms="${m.startsAt?new Date(m.startsAt).getTime():0}" data-duration-sec="${durationSec}">⏱ ${formatGameClock(elapsedSec||0)}</span>`:'';
+    const time=isLive?(m.liveStatus?`${m.liveStatus}${m.liveElapsed!=null?` · ${m.liveElapsed}'`:""}`:"● EN VIVO"):(m.status==="OPEN"?"● PRÓXIMO":"● CERRADO");
     const visibleMarkets=(m.markets||[]).filter(x=>(x.selections||[]).length).slice(0,8);
     const raceStatsHtml=m.race&&m.raceStats?`<div class="hot-stats"><b>🏎️ HOT · Carrera</b><div><span>Vuelta: ${m.raceStats.lap??0}</span><span>${(m.raceStats.drivers||[]).slice().sort((a,b)=>a.position-b.position).slice(0,5).map(d=>`${escapeHtml(d.position)}. ${escapeHtml(d.name)}`).join(' · ')}</span></div></div>`:'';
     const marketHtml=visibleMarkets.map(mk=>`<div class="live-market"><b>${escapeHtml(mk.name)}</b><div class="live-market-options">${(mk.selections||[]).slice(0,6).map(s=>{
@@ -125,9 +97,9 @@ function render(){
       return `<button class="odd ${selected?"sel":""}" data-id="${m.id}" data-sid="${s.id}" ${s.status!=="OPEN"||m.status==="CLOSED"?"disabled":""}><small>${marketCode?`<b class="lev-code">${marketCode}</b> `:''}${escapeHtml(s.label)}</small><b>${displayOdds(s.odds)}</b></button>`;
     }).join("")}</div></div>`).join("");
     return `<article class="match">
-      <div class="matchtop"><span>${escapeHtml(m.league)}</span><span class="live">${isLive?"🔴 ":""}${escapeHtml(time)}</span><span>${m.video?"▶ VIDEO":""}</span></div>
+      <div class="matchtop"><span>${escapeHtml(m.league)}</span><span class="live">${isLive?"🔴 ":""}${escapeHtml(time)} ${gameClock}</span><span>${m.video?"▶ VIDEO":""}</span></div>
       <div class="event"><span>☆</span><div class="team">${escapeHtml(m.home)}<small>${m.score[0]}</small></div></div>
-      <div class="scoreline">${isSimulatedEvent(m)?`Marcador · ${m.score[0]} - ${m.score[1]} <span class="sim-clock" data-event-id="${m.id}">${clock?.finished?`FINAL · ${clock.display}`:`${clock?.live?'EN VIVO · ':''}${clock?.display||'00:00'}`}</span>`:(isLive?`Marcador en vivo · ${m.score[0]} - ${m.score[1]}`:"")} </div>
+      <div class="scoreline">${isLive?`Marcador en vivo · ${m.score[0]} - ${m.score[1]}`:""} </div>
       <div class="event" style="padding-top:0"><span></span><div class="team">${escapeHtml(m.away)}<small>${m.score[1]}</small></div></div>
       ${raceStatsHtml}${m.hot && m.hotStats ? `<div class="hot-stats"><b>🔥 HOT · Datos del partido</b><div><span>Win: ${m.hotStats.winPct?.[0]??0}% / ${m.hotStats.winPct?.[1]??0}% / ${m.hotStats.winPct?.[2]??0}%</span><span>Posesión: ${m.hotStats.possession?.[0]??0}% - ${m.hotStats.possession?.[1]??0}%</span><span>Tiros: ${m.hotStats.shots?.[0]??0} - ${m.hotStats.shots?.[1]??0}</span><span>Ataques: ${m.hotStats.attacks?.[0]??0} - ${m.hotStats.attacks?.[1]??0}</span></div></div>` : ''}
       ${marketHtml||'<div class="empty">Sin mercados disponibles en este momento.</div>'}
@@ -174,8 +146,36 @@ $("#register").onclick=async()=>{try{let n=$("#rn").value.trim(),c=$("#rc").valu
 $("#login").onclick=async()=>{try{let d=await api("/api/auth/login",{method:"POST",body:JSON.stringify({identifier:$("#lc").value.trim(),password:$("#lp").value})});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Sesión iniciada ✓")}catch(e){toast(e.message)}};
 $$('[data-oauth]').forEach(b=>b.onclick=()=>{ window.location.href="/api/auth/google?action=login"; });
 $$('[data-link-oauth]').forEach(b=>b.onclick=()=>{ const provider=b.dataset.linkOauth; if(provider==="google") window.location.href="/api/auth/google?action=link"; });
-setInterval(updateSimulatedClocks,1000);
-setInterval(refreshMarketsOnly,40000);
+async function refreshDisplayedMarkets(){
+  if(document.visibilityState!=="visible" || eventsLoading || !M.length)return;
+  const ids=M.map(x=>x.id).filter(Boolean);
+  if(!ids.length)return;
+  try{
+    const d=await api('/api/market-refresh?ids='+encodeURIComponent(ids.join(',')));
+    const byEvent=new Map((d.events||[]).map(e=>[String(e.id),e]));
+    let changed=false;
+    for(const e of M){
+      const fresh=byEvent.get(String(e.id));
+      if(fresh?.markets){e.markets=fresh.markets;e.odds=fresh.odds||e.odds;changed=true;}
+    }
+    if(changed)render();
+  }catch(e){console.warn('BetLive market refresh:',e.message)}
+}
+// IMPORTANT: this timer refreshes ONLY market odds. It never reloads the sport/category.
+setInterval(refreshDisplayedMarkets,40000);
+
+let clockTimer=null;
+function formatGameClock(seconds){const s=Math.max(0,Math.floor(Number(seconds)||0));return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;}
+function updateGameClocks(){
+  const now=Date.now();
+  document.querySelectorAll('[data-game-clock]').forEach(el=>{
+    const start=Number(el.dataset.startMs||0),duration=Number(el.dataset.durationSec||480);
+    if(!start)return;
+    const elapsed=Math.max(0,Math.min(duration,Math.floor((now-start)/1000)));
+    el.textContent=formatGameClock(elapsed);
+  });
+}
+clockTimer=setInterval(updateGameClocks,1000);
 renderSlip();
 
 let supportTimer=null;

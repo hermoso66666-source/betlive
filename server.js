@@ -471,24 +471,35 @@ app.get("/api/virtual/all",async(req,res)=>{
   try{
     const live=String(req.query.live||"true")==="true";
     const events=(await Promise.all(VIRTUAL_SPORTS.map(s=>virtualSportsManager.list(s,live)))).flat().sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at));
-    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2",engines:VIRTUAL_SPORTS,durationSeconds:480});
+    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2",engines:VIRTUAL_SPORTS});
+  }catch(e){res.status(500).json({error:e.message})}
+});
+app.get("/api/market-refresh",async(req,res)=>{
+  try{
+    const ids=String(req.query.ids||'').split(',').map(x=>x.trim()).filter(x=>/^[0-9a-fA-F-]{36}$/.test(x)).slice(0,300);
+    if(!ids.length)return res.json({events:[],source:'BETLIVE_MARKET_ENGINE'});
+    if(virtualSportsManager) await virtualSportsManager.refreshMarkets().catch(e=>console.warn('virtual market refresh:',e.message));
+    if(INTERNAL_LEV_ENABLED) await generateInternalMarketsForAllActiveEvents().catch(e=>console.warn('football market refresh:',e.message));
+    const {rows}=await pool.query(`SELECT e.id,COALESCE(jsonb_agg(jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN'))) FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.id=ANY($1::uuid[]) GROUP BY e.id`,[ids]);
+    const events=rows.map(e=>({...e,markets:e.markets||[],odds:(e.markets||[]).flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})))}));
+    res.json({events,source:'BETLIVE_MARKET_ENGINE',intervalSeconds:40});
   }catch(e){res.status(500).json({error:e.message})}
 });
 app.get("/api/events/hot",async(req,res)=>{
   try{
     const live=String(req.query.live||"true")==="true";
     const events=virtualSportsManager? (await Promise.all(VIRTUAL_SPORTS.map(s=>virtualSportsManager.list(s,live)))).flat().sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at)) : [];
-    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2",intervalMs:HOT_INTERVAL_MS,durationMinutes:HOT_DURATION_MINUTES,durationSeconds:HOT_DURATION_MINUTES*60});
+    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2",intervalMs:HOT_INTERVAL_MS,durationMinutes:HOT_DURATION_MINUTES});
   }catch(e){res.status(500).json({error:e.message})}
 });
 app.get("/api/events/hot/upcoming",async(req,res)=>{
   try{
     const events=virtualSportsManager?(await Promise.all(VIRTUAL_SPORTS.map(s=>virtualSportsManager.list(s,false)))).flat().sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at)):[];
-    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2",durationSeconds:HOT_DURATION_MINUTES*60});
+    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2"});
   }catch(e){res.status(500).json({error:e.message})}
 });
-app.get("/api/events/races",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows.map(e=>({...e,sim_duration_seconds:RACE_DURATION_MINUTES*60}))});}catch(e){res.status(500).json({error:e.message})}});
-app.get("/api/races/upcoming",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status='OPEN' AND e.starts_at>=NOW() GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows.map(e=>({...e,sim_duration_seconds:RACE_DURATION_MINUTES*60}))});}catch(e){res.status(500).json({error:e.message})}});
+app.get("/api/events/races",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows});}catch(e){res.status(500).json({error:e.message})}});
+app.get("/api/races/upcoming",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status='OPEN' AND e.starts_at>=NOW() GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows});}catch(e){res.status(500).json({error:e.message})}});
 app.get("/api/events",async(req,res)=>{
   try{
     // Self-heal: the market engine is independent and should be able to repair
@@ -1447,40 +1458,6 @@ app.get("/api/live/markets",async(req,res)=>{
     res.json({enabled:INTERNAL_LEV_ENABLED,mode:"independent",markets:rows});
   }catch(e){res.status(500).json({error:e.message})}
 });
-
-// Market-only refresh: updates odds without reloading the event catalog, scores or UI state.
-// Virtual sports/racing stay local; real football uses BetLive internal L/E/V pricing.
-app.get("/api/markets/refresh",async(req,res)=>{
-  try{
-    const raw=String(req.query.ids||"").split(",").map(x=>x.trim()).filter(Boolean).slice(0,200);
-    if(!raw.length)return res.json({markets:[],updated:0,source:"BETLIVE_MARKET_ENGINE"});
-    const {rows:events}=await pool.query(`SELECT * FROM sports_events WHERE id=ANY($1::uuid[]) AND status IN ('OPEN','LIVE')`,[raw]);
-    let updated=0;
-    for(const e of events){
-      try{
-        if(String(e.external_source||"").startsWith("HOT_")){
-          const engine=virtualSportsManager?.engineForEvent(e.external_source);
-          if(engine){await engine.ensureMarkets(e);updated++;}
-        }else if(e.external_source==='RACE_ENGINE'){
-          await ensureRaceMarkets(e);updated++;
-        }else if(e.external_source==='API_FOOTBALL' && e.sport==='Fútbol'){
-          await generateInternalLEV(e,null);updated++;
-        }
-      }catch(err){console.warn("market-only refresh skipped",e.id,err.message)}
-    }
-    const {rows}=await pool.query(`
-      SELECT e.id event_id,m.id market_id,m.name,m.market_type,m.status market_status,
-             s.id selection_id,s.code,s.label,s.odds,s.status selection_status
-      FROM sports_events e
-      JOIN markets m ON m.event_id=e.id AND m.status='OPEN'
-      JOIN market_selections s ON s.market_id=m.id AND s.status='OPEN'
-      WHERE e.id=ANY($1::uuid[]) AND e.status IN ('OPEN','LIVE')
-      ORDER BY e.id,m.created_at,s.created_at
-    `,[raw]);
-    res.json({markets:rows,updated,source:"BETLIVE_MARKET_ENGINE",refreshedAt:new Date().toISOString()});
-  }catch(e){res.status(500).json({error:e.message||"No se pudieron refrescar los momios"})}
-});
-
 
 app.get("/admin",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));
 app.get("/admin/",(req,res)=>res.sendFile(path.join(__dirname,"admin.html")));

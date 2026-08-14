@@ -1,1 +1,1 @@
-V21 — Motores simulados independientes; reloj en tiempo real y actualización de mercados sin recarga de eventos
+V20 — Independent virtual engines; sport-specific rosters; guarded refresh; expanded markets with American odds display

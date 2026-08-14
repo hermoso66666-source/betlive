@@ -1,1 +1,1 @@
-V21 — Reloj simulado segundo a segundo + refresco de momios cada 40s sin recargar eventos
+V20 — Roster por deporte + carga sin carreras + mercados virtuales ampliados

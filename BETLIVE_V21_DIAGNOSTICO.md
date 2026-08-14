@@ -1,17 +1,20 @@
-# BetLive V21 — Diagnóstico y cambios
+# BetLive V21 — diagnóstico y corrección
 
-- Los deportes simulados siguen separados por motor y por roster. No comparten jugadores entre Fútbol 2H2, Básquetbol, Béisbol, Tenis y Hockey.
-- Los partidos simulados conservan su duración definida por motor y ahora exponen esa duración al frontend.
-- Se añadió un reloj MM:SS que avanza cada segundo usando starts_at y la duración del evento; no depende de API-Football.
-- La puntuación mostrada sigue el marcador persistido por el motor y se mantiene separada del reloj.
-- Se eliminó el refresco general de 30 segundos del frontend.
-- Cada 40 segundos se llama únicamente a /api/markets/refresh para actualizar momios sin recargar eventos ni cambiar de categoría.
-- En fútbol real, el refresco usa el motor interno L/E/V de BetLive. API-Football continúa reservado para el feed real de fútbol.
-- En deportes simulados y carreras, el refresco usa exclusivamente sus motores internos.
-- Se actualizó app.js y el Service Worker a V8 para evitar caché de la versión anterior.
+## Problemas observados
+- El frontend recargaba la categoría completa mediante un temporizador global. Eso podía volver a mostrar `Cargando...`, reemplazar el DOM y hacer parecer que el deporte se reiniciaba.
+- Los momios no necesitaban reconstruir la lista de eventos.
+- Los motores simulados tenían horario limitado 08:00–20:00 para varios deportes; fuera de ese horario podían devolver cero eventos.
+- Los partidos simulados avanzaban en backend por minutos, mientras el cliente no mostraba un reloj segundo a segundo.
+- API-Football puede quedar temporalmente limitado por cuota; eso debe afectar solamente al fútbol real, no a los motores simulados.
 
-## Validación
+## V21
+- Eliminado el refresco general de categorías del navegador.
+- Nuevo `/api/market-refresh`: refresca solamente mercados/momios cada 40 segundos.
+- El navegador conserva `M` y actualiza únicamente mercados; no vuelve a solicitar/reconstruir partidos.
+- Reloj visual segundo a segundo para HOT/carreras, basado en `starts_at` y duración del motor.
+- Básquetbol, béisbol, tenis y hockey simulados quedan 24/7 para que no desaparezcan por la hora local.
+- Se mantiene API-Football exclusivamente en el pipeline de fútbol real.
+- Cache de frontend actualizado a V21 para evitar ejecutar JavaScript antiguo.
 
-- node --check server.js
-- node --check app.js
-- node --check virtual-sport-engine.js
+## Limitación importante
+Si API-Football devuelve cuota agotada/429 o no tiene partidos reales, V21 no inventa partidos reales de fútbol. Los partidos reales deben venir de API-Football o permanecer en la base local como caché.
