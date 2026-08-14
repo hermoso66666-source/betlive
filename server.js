@@ -897,8 +897,13 @@ app.post("/api/admin/wallet-requests/:id/resolve",auth,requireAdmin,async(req,re
     }
     await client.query("UPDATE wallet_requests SET status=$1,admin_id=$2,resolved_at=NOW() WHERE id=$3",[status,req.user.id,x.id]);
     await client.query("COMMIT");
-    await audit(req.user.id,"RESOLVE_WALLET_REQUEST","wallet_request",x.id,{status});
-    res.json({ok:true,status});
+    await audit(req.user.id,"RESOLVE_WALLET_REQUEST","wallet_request",x.id,{status,credited_deposit:status==="APPROVED"&&x.type==="DEPOSIT"});
+    let balance_cents=null;
+    if(status==="APPROVED"&&x.type==="DEPOSIT"){
+      const b=await pool.query("SELECT balance_cents FROM users WHERE id=$1",[x.user_id]);
+      balance_cents=b.rows[0]?.balance_cents??null;
+    }
+    res.json({ok:true,status,balance_cents});
   }catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}
 });
 app.post("/api/admin/wallet-requests/:id/paid",auth,requireAdmin,async(req,res)=>{
