@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { buildVirtualMarkets, virtualMarketEngineMeta } from './virtual-market-engine.js';
 
 const DEFAULT_PLAYERS = [
   'Aaron Avila','Bruno Castillo','Carlos Mendoza','Damián Reyes','Emilio Torres','Fabio Navarro','Gael Romero','Héctor Salinas','Iván Duarte','Julián Vega',
@@ -52,7 +53,7 @@ export function createVirtualSportEngine({pool,deterministicUuid,config}){
     pairPool:config.pairPool||[['Aston Avila','New Castel'],['Madri Nova','Barceluna'],['Munich Red','Paris Azul'],['Milan Norte','Londres City']],
     scoreModel:config.scoreModel||((minute,seed)=>[Math.min(20,Math.floor(2+minute*.8+(seed%4))),Math.min(20,Math.floor(2+minute*.7+((seed>>3)%4)))])
   };
-  const state={sport:cfg.sport,source:cfg.source,enabled:true,lastRunAt:null,lastRunMs:0,lastError:null,created:0,updated:0,closed:0};
+  const state={sport:cfg.sport,source:cfg.source,enabled:true,lastRunAt:null,lastRunMs:0,lastError:null,created:0,updated:0,closed:0,marketEngineVersion:virtualMarketEngineMeta.version};
 
   function pair(slot,index){
     const p=cfg.pairPool[(slot+index)%cfg.pairPool.length];
@@ -70,83 +71,8 @@ export function createVirtualSportEngine({pool,deterministicUuid,config}){
       form:[Math.max(0,pct-12),Math.min(100,pct+12)]
     };
   }
-  function clampOdd(v){return Number(Math.max(1.18,Math.min(8.00,v)).toFixed(2));}
-  function winnerProbabilities(event, seed){
-    const h=Number(event.home_score)||0,a=Number(event.away_score)||0;
-    const diff=h-a;
-    const elapsed=cfg.durationMinutes>0?Math.max(0,Math.min(1,Number(event.live_elapsed||0)/cfg.durationMinutes)):0;
-    const randomBias=.50+(((seed%21)-10)/500);
-    if(String(event.status||'')!=='LIVE' || elapsed<=0){
-      return [randomBias,1-randomBias];
-    }
-    if(diff===0){
-      const bias=.50+(((seed>>5)%17)-8)/300;
-      return [bias,1-bias];
-    }
-    const lead=clamp(.60+.18*elapsed+.045*Math.min(Math.abs(diff),3),.56,.90);
-    return diff>0?[lead,1-lead]:[1-lead,lead];
-  }
-  function winnerOdds(event, seed){
-    const [hp,ap]=winnerProbabilities(event,seed);
-    return [clampOdd(1/(hp*1.06)),clampOdd(1/(ap*1.06))];
-  }
-  function winnerOdds1X2(event, seed){
-    const [hp,ap]=winnerProbabilities(event,seed);
-    const elapsed=cfg.durationMinutes>0?Math.max(0,Math.min(1,Number(event.live_elapsed||0)/cfg.durationMinutes)):0;
-    let draw=String(event.status||'')==='LIVE' && (Number(event.home_score)||0)!==(Number(event.away_score)||0)
-      ? clamp(.22-.10*elapsed,.08,.22)
-      : .30;
-    const scale=1-draw;
-    const probs=[hp*scale,draw,ap*scale];
-    return probs.map(p=>clampOdd(1/(Math.max(.01,p)*1.045)));
-  }
   function markets(event){
-    const h=Number(event.home_score)||0,a=Number(event.away_score)||0;
-    const seed=hash(`${cfg.source}:${event.id}`);
-    const [fav,dog]=winnerOdds(event,seed);
-    const totalBase=Math.max(1,(h+a)+0.5);
-    const over=clampOdd(1.58+(((seed>>8)%22)/100));
-    const under=clampOdd(1.72+(((seed>>12)%28)/100));
-    const handicapFav=clampOdd(1.62+(((seed>>16)%24)/100));
-    const handicapDog=clampOdd(1.88+(((seed>>20)%34)/100));
-    const altFav=clampOdd(1.78+(((seed>>24)%28)/100));
-    const altDog=clampOdd(2.02+(((seed>>2)%48)/100));
-    const markets=[];
-    if(cfg.sport==='Fútbol'){
-      const [fav1x2,draw1x2,dog1x2]=winnerOdds1X2(event,seed);
-      markets.push({type:'MATCH_WINNER',name:'Ganador 1X2',selections:[
-        {code:'1',label:'Local',odds:fav1x2},{code:'X',label:'Empate',odds:draw1x2},{code:'2',label:'Visitante',odds:dog1x2}
-      ]});
-      markets.push({type:'TOTAL_GOALS',name:`Total de goles ${Math.floor(totalBase)}`,selections:[{code:'O',label:`Más de ${Math.floor(totalBase)}`,odds:over},{code:'U',label:`Menos de ${Math.floor(totalBase)}`,odds:under}]});
-      markets.push({type:'HANDICAP',name:'Hándicap',selections:[{code:'H1',label:'Local -1',odds:handicapFav},{code:'H2',label:'Visitante +1',odds:handicapDog}]});
-      markets.push({type:'BOTH_SCORE',name:'Ambos marcan',selections:[{code:'BTTS_Y',label:'Sí',odds:1.68},{code:'BTTS_N',label:'No',odds:2.08}]});
-      markets.push({type:'TOTAL_GOALS_ALT',name:'Línea alternativa',selections:[{code:'O15',label:'Más de 1.5',odds:1.43},{code:'U25',label:'Menos de 2.5',odds:1.77}]});
-    } else if(cfg.sport==='Básquetbol'){
-      markets.push({type:'MATCH_WINNER',name:'Ganador del partido',selections:[{code:'H',label:'Local',odds:fav},{code:'A',label:'Visitante',odds:dog}]});
-      markets.push({type:'SPREAD',name:'Hándicap',selections:[{code:'HS',label:'Local -4.5',odds:handicapFav},{code:'AS',label:'Visitante +4.5',odds:handicapDog}]});
-      markets.push({type:'TOTAL_POINTS',name:'Total de puntos',selections:[{code:'O',label:'Más de 165.5',odds:over},{code:'U',label:'Menos de 165.5',odds:under}]});
-      markets.push({type:'TEAM_TOTAL',name:'Puntos local',selections:[{code:'HO',label:'Más de 82.5',odds:1.64},{code:'HU',label:'Menos de 82.5',odds:2.04}]});
-      markets.push({type:'ALT_SPREAD',name:'Hándicap alternativo',selections:[{code:'HA',label:'Local -1.5',odds:1.48},{code:'AA',label:'Visitante +7.5',odds:2.32}]});
-    } else if(cfg.sport==='Béisbol'){
-      markets.push({type:'MATCH_WINNER',name:'Ganador del juego',selections:[{code:'H',label:'Local',odds:fav},{code:'A',label:'Visitante',odds:dog}]});
-      markets.push({type:'RUN_LINE',name:'Carrera de ventaja',selections:[{code:'RLH',label:'Local -1.5',odds:2.05},{code:'RLA',label:'Visitante +1.5',odds:1.67}]});
-      markets.push({type:'TOTAL_RUNS',name:'Total de carreras',selections:[{code:'O',label:'Más de 8.5',odds:1.76},{code:'U',label:'Menos de 8.5',odds:1.78}]});
-      markets.push({type:'TEAM_RUNS',name:'Carreras local',selections:[{code:'HO',label:'Más de 3.5',odds:1.72},{code:'HU',label:'Menos de 3.5',odds:2.02}]});
-      markets.push({type:'FIRST_INNING',name:'Primera entrada',selections:[{code:'Y',label:'Ambos anotan',odds:2.18},{code:'N',label:'No anotan ambos',odds:1.58}]});
-    } else if(cfg.sport==='Tenis'){
-      markets.push({type:'MATCH_WINNER',name:'Ganador del partido',selections:[{code:'H',label:'Local',odds:fav},{code:'A',label:'Visitante',odds:dog}]});
-      markets.push({type:'SETS',name:'Total de sets',selections:[{code:'O',label:'Más de 2.5',odds:2.02},{code:'U',label:'Menos de 2.5',odds:1.66}]});
-      markets.push({type:'GAMES',name:'Total de juegos',selections:[{code:'O',label:'Más de 21.5',odds:1.82},{code:'U',label:'Menos de 21.5',odds:1.84}]});
-      markets.push({type:'SET1',name:'Ganador set 1',selections:[{code:'H1',label:'Local',odds:1.57},{code:'A1',label:'Visitante',odds:2.25}]});
-      markets.push({type:'HANDICAP_GAMES',name:'Hándicap de juegos',selections:[{code:'HG1',label:'Local -2.5',odds:1.88},{code:'HG2',label:'Visitante +2.5',odds:1.74}]});
-    } else {
-      markets.push({type:'MATCH_WINNER',name:'Ganador del partido',selections:[{code:'H',label:'Local',odds:fav},{code:'A',label:'Visitante',odds:dog}]});
-      markets.push({type:'PUCK_LINE',name:'Línea de puck',selections:[{code:'PH',label:'Local -1.5',odds:2.04},{code:'PA',label:'Visitante +1.5',odds:1.69}]});
-      markets.push({type:'TOTAL_GOALS',name:'Total de goles',selections:[{code:'O',label:'Más de 5.5',odds:1.71},{code:'U',label:'Menos de 5.5',odds:1.93}]});
-      markets.push({type:'TEAM_TOTAL',name:'Goles local',selections:[{code:'HO',label:'Más de 2.5',odds:1.73},{code:'HU',label:'Menos de 2.5',odds:1.91}]});
-      markets.push({type:'PERIOD1',name:'Primer periodo',selections:[{code:'H1',label:'Local',odds:1.81},{code:'A1',label:'Visitante',odds:2.12}]});
-    }
-    return markets;
+    return buildVirtualMarkets(event,{sport:cfg.sport,source:cfg.source,durationMinutes:cfg.durationMinutes,margin:0.055});
   }
   async function ensureMarkets(event){
     const defs=markets(event);
