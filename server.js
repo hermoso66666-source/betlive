@@ -7,6 +7,13 @@ const HOT_OTHER_START_HOUR=8;
 const HOT_OTHER_END_HOUR=20;
 const HOT_ROLLING_HOURS=28;
 const HOT_ROTATION_HOURS=4;
+const RACE_ENABLED=String(process.env.RACE_ENABLED??"true").toLowerCase()!=="false";
+const RACE_INTERVAL_MS=5*60*1000;
+const RACE_DURATION_MINUTES=6;
+const RACE_ROLLING_HOURS=24;
+const RACE_ROTATION_HOURS=4;
+const RACE_DRIVERS=["Aero","Blaze","Comet","Drift","Falcon","Flash","Ghost","Hawk","Jett","Nova","Pulse","Raptor","Rocket","Shadow","Storm","Titan","Viper","Wolf","Zen","Turbo"];
+const RACE_TEAMS=["Redline","Velocity","Apex","Nova Racing","Thunder","Orbit","Falcon Motors","Pulse GP"];
 const HOT_SPORTS=["Fútbol","Básquetbol","Béisbol","Tenis"];
 const HOT_TEAM_POOLS={
   "Fútbol":[["Aston Avila","New Castel"],["Madri Nova","Barceluna"],["Munich Red","Paris Azul"],["Milan Norte","Londres City"],["Madrid Rayo","Liverpool Sol"]],
@@ -273,6 +280,18 @@ async function dbInit(){
    message TEXT NOT NULL CHECK(length(trim(message))>0), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), read_at TIMESTAMPTZ
  );
  CREATE INDEX IF NOT EXISTS idx_support_messages_user_created ON support_messages(user_id,created_at ASC);
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS race_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS race_locked BOOLEAN NOT NULL DEFAULT FALSE;
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS race_winner VARCHAR(120);
+ ALTER TABLE sports_events ADD COLUMN IF NOT EXISTS race_stats JSONB NOT NULL DEFAULT '{}'::jsonb;
+ CREATE INDEX IF NOT EXISTS idx_race_events ON sports_events(race_enabled,status,starts_at);
+ CREATE TABLE IF NOT EXISTS promotions(id UUID PRIMARY KEY,title VARCHAR(120) NOT NULL,body TEXT NOT NULL DEFAULT '',promo_kind VARCHAR(30) NOT NULL DEFAULT 'INFO',bonus_cents BIGINT NOT NULL DEFAULT 0 CHECK(bonus_cents>=0),min_deposit_cents BIGINT NOT NULL DEFAULT 0 CHECK(min_deposit_cents>=0),starts_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),ends_at TIMESTAMPTZ,active BOOLEAN NOT NULL DEFAULT TRUE,terms TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+ CREATE INDEX IF NOT EXISTS idx_promotions_active_dates ON promotions(active,starts_at,ends_at);
+ CREATE TABLE IF NOT EXISTS user_promotions(id UUID PRIMARY KEY,user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,promotion_id UUID NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,status VARCHAR(20) NOT NULL DEFAULT 'AVAILABLE',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),claimed_at TIMESTAMPTZ,UNIQUE(user_id,promotion_id));
+ CREATE TABLE IF NOT EXISTS notifications(id UUID PRIMARY KEY,user_id UUID REFERENCES users(id) ON DELETE CASCADE,title VARCHAR(120) NOT NULL,body TEXT NOT NULL DEFAULT '',kind VARCHAR(30) NOT NULL DEFAULT 'INFO',read_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+ CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id,created_at DESC);
+ CREATE TABLE IF NOT EXISTS promo_calendar(id UUID PRIMARY KEY,day_no INT NOT NULL CHECK(day_no BETWEEN 1 AND 31),title VARCHAR(120) NOT NULL,body TEXT NOT NULL DEFAULT '',reward_label VARCHAR(120) NOT NULL DEFAULT '',active BOOLEAN NOT NULL DEFAULT TRUE,UNIQUE(day_no));
+ INSERT INTO promo_calendar(id,day_no,title,body,reward_label) VALUES('00000000-0000-0000-0000-000000000001',1,'Bienvenido','Revisa las promociones disponibles del día.','Beneficio del día'),('00000000-0000-0000-0000-000000000003',3,'Día especial','Consulta las condiciones de esta promoción.','Beneficio especial'),('00000000-0000-0000-0000-000000000007',7,'Semana completa','Nueva promoción disponible.','Beneficio semanal') ON CONFLICT(day_no) DO NOTHING;
  `);
  await seedDemoEvents();
 }
@@ -533,7 +552,8 @@ app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 // Public catalog
 app.get("/api/events/hot",async(req,res)=>{
   try{
-    await advanceHotEvents();
+    let engineWarning=null;
+    try{await advanceHotEvents();}catch(err){engineWarning=err.message;console.error("HOT public feed cycle:",err.message)}
     const live=String(req.query.live||"true")==="true";
     const {rows}=await pool.query(`
       SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,e.hot_stats,
@@ -545,12 +565,13 @@ app.get("/api/events/hot",async(req,res)=>{
       WHERE e.hot_enabled=TRUE AND e.status IN ('OPEN','LIVE') AND ($1::boolean=FALSE OR e.status='LIVE')
       GROUP BY e.id ORDER BY e.starts_at LIMIT 250
     `,[live]);
-    res.json({events:rows,source:"HOT_ENGINE",category:HOT_CATEGORY_LABEL,intervalMs:HOT_INTERVAL_MS,durationMinutes:HOT_DURATION_MINUTES});
+    res.json({events:rows,source:"HOT_ENGINE",category:HOT_CATEGORY_LABEL,intervalMs:HOT_INTERVAL_MS,durationMinutes:HOT_DURATION_MINUTES,warning:engineWarning});
   }catch(e){res.status(500).json({error:e.message})}
 });
 app.get("/api/events/hot/upcoming",async(req,res)=>{
   try{
-    await advanceHotEvents();
+    let engineWarning=null;
+    try{await advanceHotEvents();}catch(err){engineWarning=err.message;console.error("HOT upcoming cycle:",err.message)}
     const {rows}=await pool.query(`
       SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,e.hot_stats,
       COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',
@@ -564,6 +585,8 @@ app.get("/api/events/hot/upcoming",async(req,res)=>{
     res.json({events:rows,source:"HOT_ENGINE",category:HOT_CATEGORY_LABEL});
   }catch(e){res.status(500).json({error:e.message})}
 });
+app.get("/api/events/races",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows});}catch(e){res.status(500).json({error:e.message})}});
+app.get("/api/races/upcoming",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status='OPEN' AND e.starts_at>=NOW() GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows});}catch(e){res.status(500).json({error:e.message})}});
 app.get("/api/events",async(req,res)=>{
   try{
     // Self-heal: the market engine is independent and should be able to repair
@@ -759,6 +782,10 @@ app.post("/api/support/messages",auth,async(req,res)=>{
   res.status(201).json({message:rows[0]});
 });
 
+app.get("/api/promotions",async(req,res)=>{const {rows}=await pool.query(`SELECT id,title,body,promo_kind,bonus_cents,min_deposit_cents,starts_at,ends_at,terms FROM promotions WHERE active=TRUE AND starts_at<=NOW() AND (ends_at IS NULL OR ends_at>=NOW()) ORDER BY created_at DESC LIMIT 30`);res.json({promotions:rows});});
+app.get("/api/promo-calendar",auth,async(req,res)=>{const {rows}=await pool.query("SELECT day_no,title,body,reward_label FROM promo_calendar WHERE active=TRUE ORDER BY day_no");res.json({days:rows,month:new Date().toISOString().slice(0,7)});});
+app.get("/api/notifications",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,title,body,kind,read_at,created_at FROM notifications WHERE user_id=$1 OR user_id IS NULL ORDER BY created_at DESC LIMIT 100",[req.user.id]);res.json({notifications:rows});});
+app.post("/api/notifications/:id/read",auth,async(req,res)=>{await pool.query("UPDATE notifications SET read_at=NOW() WHERE id=$1 AND (user_id=$2 OR user_id IS NULL)",[req.params.id,req.user.id]);res.json({ok:true});});
 app.get("/api/wallet/transactions",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,type,amount_cents,balance_after_cents,reason,created_at FROM balance_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100",[req.user.id]);res.json({transactions:rows})});
 app.get("/api/wallet/requests",auth,async(req,res)=>{const {rows}=await pool.query("SELECT id,type,amount_cents,status,note,payout_details,admin_note,created_at,resolved_at FROM wallet_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",[req.user.id]);res.json({requests:rows})});
 app.post("/api/wallet/requests",auth,async(req,res)=>{const type=req.body.type,amount=Math.trunc(Number(req.body.amountCents)),note=String(req.body.note||"").slice(0,255);if(!['DEPOSIT','WITHDRAWAL'].includes(type)||!Number.isSafeInteger(amount)||amount<100)return res.status(400).json({error:"Solicitud inválida"});const {rows}=await pool.query("INSERT INTO wallet_requests(id,user_id,type,amount_cents,note) VALUES($1,$2,$3,$4,$5) RETURNING *",[crypto.randomUUID(),req.user.id,type,amount,note]);res.status(201).json({request:rows[0]})});
@@ -940,6 +967,15 @@ app.post("/api/admin/support/:userId/messages",auth,requireAdmin,async(req,res)=
   res.status(201).json({message:rows[0]});
 });
 
+app.get("/api/admin/races/status",auth,requireAdmin,async(req,res)=>{const [c,e]=await Promise.all([pool.query(`SELECT COUNT(*) FILTER(WHERE race_enabled)::int total,COUNT(*) FILTER(WHERE race_enabled AND status='LIVE')::int live,COUNT(*) FILTER(WHERE race_enabled AND status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE race_enabled AND status='CLOSED')::int closed FROM sports_events`),pool.query(`SELECT id,home_team,away_team,starts_at,status,live_elapsed,race_winner,race_locked,race_stats FROM sports_events WHERE race_enabled=TRUE ORDER BY starts_at DESC LIMIT 100`)]);res.json({enabled:RACE_ENABLED,intervalMinutes:5,durationMinutes:RACE_DURATION_MINUTES,rotationHours:RACE_ROTATION_HOURS,counts:c.rows[0],events:e.rows});});
+app.post("/api/admin/races/generate",auth,requireAdmin,async(req,res)=>{try{const r=await seedRaceSchedule();await advanceRaceEvents();await audit(req.user.id,'RACE_GENERATE','race',null,r);res.json({ok:true,...r});}catch(e){res.status(500).json({ok:false,error:e.message});}});
+app.post("/api/admin/races/event/:id/control",auth,requireAdmin,async(req,res)=>{const status=String(req.body.status||'').toUpperCase(),elapsed=Math.max(0,Math.min(RACE_DURATION_MINUTES,Math.trunc(Number(req.body.elapsed)||0)));if(!['OPEN','LIVE','CLOSED'].includes(status))return res.status(400).json({error:'Estado inválido'});const {rows}=await pool.query("UPDATE sports_events SET status=$1,live_elapsed=$2,race_locked=$3,race_winner=$4 WHERE id=$5 AND race_enabled=TRUE RETURNING *",[status,elapsed,Boolean(req.body.locked),String(req.body.winner||'').slice(0,120)||null,req.params.id]);if(!rows[0])return res.status(404).json({error:'Carrera no encontrada'});await audit(req.user.id,'RACE_CONTROL','race',req.params.id,{status,elapsed});res.json({ok:true,event:rows[0]});});
+app.get("/api/admin/promotions",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query("SELECT * FROM promotions ORDER BY created_at DESC LIMIT 200");res.json({promotions:rows});});
+app.post("/api/admin/promotions",auth,requireAdmin,async(req,res)=>{const title=String(req.body.title||'').trim().slice(0,120),body=String(req.body.body||'').trim().slice(0,2000);if(!title||!body)return res.status(400).json({error:'Título y mensaje son obligatorios'});const {rows}=await pool.query("INSERT INTO promotions(id,title,body,promo_kind,bonus_cents,min_deposit_cents,starts_at,ends_at,active,terms) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",[crypto.randomUUID(),title,body,String(req.body.promoKind||'INFO').slice(0,30),Math.max(0,Math.trunc(Number(req.body.bonusCents)||0)),Math.max(0,Math.trunc(Number(req.body.minDepositCents)||0)),req.body.startsAt||new Date(),req.body.endsAt||null,req.body.active!==false,String(req.body.terms||'').slice(0,3000)]);await audit(req.user.id,'CREATE_PROMOTION','promotion',rows[0].id,{title});res.status(201).json({promotion:rows[0]});});
+app.patch("/api/admin/promotions/:id",auth,requireAdmin,async(req,res)=>{const map={title:'title',body:'body',promoKind:'promo_kind',bonusCents:'bonus_cents',minDepositCents:'min_deposit_cents',startsAt:'starts_at',endsAt:'ends_at',active:'active',terms:'terms'},sets=[],vals=[];for(const [k,c] of Object.entries(map)){if(req.body[k]!==undefined){sets.push(`${c}=$${vals.length+1}`);vals.push(k.endsWith('Cents')?Math.max(0,Math.trunc(Number(req.body[k])||0)):k==='active'?Boolean(req.body[k]):String(req.body[k]??'').slice(0,3000));}}if(!sets.length)return res.status(400).json({error:'Sin cambios'});vals.push(req.params.id);const {rows}=await pool.query(`UPDATE promotions SET ${sets.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:'Promoción no encontrada'});res.json({promotion:rows[0]});});
+app.delete("/api/admin/promotions/:id",auth,requireAdmin,async(req,res)=>{await pool.query("DELETE FROM promotions WHERE id=$1",[req.params.id]);res.json({ok:true});});
+app.get("/api/admin/notifications",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query("SELECT n.id,n.user_id,n.title,n.body,n.kind,n.created_at,COALESCE(u.name,'Todos') user_name FROM notifications n LEFT JOIN users u ON u.id=n.user_id ORDER BY n.created_at DESC LIMIT 200");res.json({notifications:rows});});
+app.post("/api/admin/notifications",auth,requireAdmin,async(req,res)=>{const title=String(req.body.title||'').trim().slice(0,120),body=String(req.body.body||'').trim().slice(0,2000);if(!title||!body)return res.status(400).json({error:'Título y mensaje son obligatorios'});const {rows}=await pool.query("INSERT INTO notifications(id,user_id,title,body,kind) VALUES($1,$2,$3,$4,$5) RETURNING *",[crypto.randomUUID(),req.body.userId||null,title,body,String(req.body.kind||'INFO').slice(0,30)]);res.status(201).json({notification:rows[0]});});
 app.get("/api/admin/audit",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT a.id,a.action,a.target_type,a.target_id,a.details,a.created_at,COALESCE(u.name,'Sistema') admin_name FROM admin_audit a LEFT JOIN users u ON u.id=a.admin_id ORDER BY a.created_at DESC LIMIT 300`);res.json({audit:rows})});
 
 
@@ -1488,6 +1524,16 @@ async function advanceHotEvents(){
   const seeded=await seedHotSchedule();
   return {updated,closed,created:seeded.created};
 }
+function raceHash(v){return hotHash(`race:${v}`);}
+function raceDriverName(slot,i){return `${RACE_DRIVERS[raceHash(slot*31+i*17)%RACE_DRIVERS.length]} · ${RACE_TEAMS[raceHash(slot*13+i*7)%RACE_TEAMS.length]}`;}
+function raceStatsFor(e){const elapsed=Math.max(0,Math.min(RACE_DURATION_MINUTES,Number(e.live_elapsed)||0));const old=Array.isArray(e.race_stats?.drivers)?e.race_stats.drivers:[];const drivers=old.length?old:Array.from({length:8},(_,i)=>({name:raceDriverName(e.race_rotation||0,i),position:i+1,lap:0,gap:0,speed:180+(raceHash(e.id+i)%55),overtakes:0}));return {elapsed,lap:Math.max(1,elapsed*2),drivers};}
+function raceOdds(stats){return stats.drivers.slice().sort((a,b)=>a.position-b.position).map((d,i)=>{const p=Math.max(.03,.50/(1+i*.32)+Math.max(0,stats.elapsed||0)*.01);const o=Math.max(1.05,1/(p*1.08));return {name:d.name,odds:Number(o.toFixed(2))};});}
+async function ensureRaceMarkets(e){const key=`race:${e.id}:winner`;const q=await pool.query(`INSERT INTO markets(id,event_id,name,market_type,status,pricing_source,external_key,pricing_updated_at) VALUES($1,$2,'Ganador de carrera','RACE_WINNER','OPEN','RACE_ENGINE',$3,NOW()) ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET status='OPEN',pricing_source='RACE_ENGINE',pricing_updated_at=NOW() RETURNING id`,[crypto.randomUUID(),e.id,key]);const mid=q.rows[0]?.id||(await pool.query('SELECT id FROM markets WHERE external_key=$1',[key])).rows[0]?.id;if(!mid)return;for(const o of raceOdds(raceStatsFor(e))){const sk=`${key}:${o.name}`;await pool.query(`INSERT INTO market_selections(id,market_id,label,code,odds,status,external_key) VALUES($1,$2,$3,$4,$5,'OPEN',$6) ON CONFLICT(external_key) WHERE external_key IS NOT NULL DO UPDATE SET odds=EXCLUDED.odds,status='OPEN'`,[crypto.randomUUID(),mid,o.name,o.name.slice(0,30),o.odds,sk]);}}
+async function createRaceEvent(startsAt,slot){const eid=deterministicUuid(`race:${startsAt}`),externalId=`race:${startsAt}`,drivers=Array.from({length:8},(_,i)=>({name:raceDriverName(slot,i),position:i+1,lap:0,gap:0,speed:180+(raceHash(slot+i)%55),overtakes:0}));await pool.query(`INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,external_source,external_id,live_elapsed,live_status,score_source,score_confidence,race_enabled,race_locked,race_stats) VALUES($1,'Carreras Virtuales','🔥 HOT · Carreras Virtuales',$2,$3,$4,'OPEN',0,0,'RACE_ENGINE',$5,0,'Próxima carrera','RACE_ENGINE',100,TRUE,FALSE,$6) ON CONFLICT(external_source,external_id) WHERE external_id IS NOT NULL DO NOTHING`,[eid,drivers[0].name,drivers[1].name,startsAt,externalId,JSON.stringify({elapsed:0,lap:1,drivers})]);const q=await pool.query("SELECT * FROM sports_events WHERE external_source='RACE_ENGINE' AND external_id=$1 LIMIT 1",[externalId]);if(q.rows[0])await ensureRaceMarkets(q.rows[0]);}
+async function seedRaceSchedule(){if(!RACE_ENABLED)return {created:0};let created=0;const now=Date.now(),start=Math.ceil(now/RACE_INTERVAL_MS)*RACE_INTERVAL_MS,end=now+RACE_ROLLING_HOURS*3600000;for(let t=start;t<=end;t+=RACE_INTERVAL_MS){const key=`race:${new Date(t).toISOString()}`;const ex=await pool.query("SELECT 1 FROM sports_events WHERE external_source='RACE_ENGINE' AND external_id=$1 LIMIT 1",[key]);if(!ex.rows[0]){await createRaceEvent(new Date(t).toISOString(),Math.floor(t/(RACE_ROTATION_HOURS*3600000)));created++;}}return {created};}
+async function advanceRaceEvents(){if(!RACE_ENABLED)return {updated:0,closed:0};const q=await pool.query(`SELECT * FROM sports_events WHERE race_enabled=TRUE AND status IN ('OPEN','LIVE') AND starts_at<=NOW()+INTERVAL '1 minute' ORDER BY starts_at LIMIT 500`);let updated=0,closed=0;for(const e of q.rows){if(e.race_locked)continue;const elapsed=Math.floor((Date.now()-new Date(e.starts_at).getTime())/60000);if(elapsed<0)continue;const minute=Math.min(RACE_DURATION_MINUTES,elapsed),stats=raceStatsFor({...e,live_elapsed:minute}),seed=raceHash(e.id);stats.drivers=stats.drivers.slice().sort((a,b)=>(raceHash(seed+a.name+minute)%100)-(raceHash(seed+b.name+minute)%100)).map((d,i)=>({...d,position:i+1,lap:Math.max(1,minute*2),speed:180+(raceHash(seed+d.name)%55),overtakes:raceHash(seed+d.name+minute)%4}));const status=minute>=RACE_DURATION_MINUTES?'CLOSED':'LIVE';await pool.query(`UPDATE sports_events SET status=$1,live_elapsed=$2,live_status=$3,score_source='RACE_ENGINE',score_confidence=100,score_updated_at=NOW(),race_stats=$4,race_winner=$5 WHERE id=$6`,[status,minute,status==='LIVE'?`En vivo · ${minute}'`:'Finalizada',JSON.stringify(stats),status==='CLOSED'?stats.drivers[0]?.name:null,e.id]);if(status==='CLOSED'){await pool.query(`UPDATE markets SET status='CLOSED',pricing_updated_at=NOW() WHERE event_id=$1 AND market_type LIKE 'RACE_%'`,[e.id]);await pool.query(`UPDATE market_selections SET status='CLOSED' WHERE market_id IN (SELECT id FROM markets WHERE event_id=$1 AND market_type LIKE 'RACE_%')`,[e.id]);closed++;}else await ensureRaceMarkets({...e,live_elapsed:minute,race_stats:stats});updated++;}const seeded=await seedRaceSchedule();return {updated,closed,created:seeded.created};}
+async function startRaceEngine(){if(!RACE_ENABLED)return;try{await seedRaceSchedule();await advanceRaceEvents();}catch(e){console.error('RACE bootstrap:',e.message)}setInterval(()=>advanceRaceEvents().catch(e=>console.error('RACE cycle:',e.message)),60000);}
+
 async function startHotEngine(){
   if(!HOT_ENABLED) return;
   try{await seedHotSchedule();await advanceHotEvents();}catch(e){console.error("HOT bootstrap:",e.message)}
@@ -1526,7 +1572,7 @@ app.get("/api/health",async(req,res)=>{
         apiFootballOptional:true,
         source:"BETLIVE_ENGINE"
       },
-      hotEngine:{enabled:HOT_ENABLED,intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00",database:hotState},databaseState:{
+      hotEngine:{enabled:HOT_ENABLED,intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00",database:hotState},raceEngine:{enabled:RACE_ENABLED,intervalMinutes:5,durationMinutes:RACE_DURATION_MINUTES,rotationHours:RACE_ROTATION_HOURS,database:(await pool.query("SELECT COUNT(*) FILTER(WHERE race_enabled)::int total,COUNT(*) FILTER(WHERE race_enabled AND status='LIVE')::int live,COUNT(*) FILTER(WHERE race_enabled AND status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE race_enabled AND status='CLOSED')::int closed FROM sports_events")).rows[0]},databaseState:{
         activeEvents:events.rows[0].n,
         liveEvents:live.rows[0].n,
         openInternalMarkets:markets.rows[0].n,
@@ -1589,4 +1635,5 @@ app.listen(PORT,()=>{console.log("BetLive API escuchando en "+PORT);dbInit().the
   await ensureBootstrapAdmin();dbReady=true;console.log("Base de datos inicializada correctamente");
   startLiveSync();
   startHotEngine();
+  startRaceEngine();
 }).catch(e=>console.error("Error inicializando la base de datos:",e))});

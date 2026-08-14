@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { normalizeScoreFeed, canonicalEventKey, chooseScoreSnapshot } from '../score-engine.js';
-import { generateLEVMarket } from '../lev-engine.js';
+import { normalizeScoreFeed, canonicalEventKey, chooseScoreSnapshot } from './score-engine.js';
+import { generateLEVMarket } from './lev-engine.js';
 
 const apiPayload={response:[{fixture:{id:101,date:'2026-08-12T20:00:00Z',status:{short:'2H',long:'Second Half',elapsed:63}},league:{name:'Liga MX'},teams:{home:{name:'America'},away:{name:'Chivas'}},goals:{home:1,away:0}}]};
 const api=normalizeScoreFeed(apiPayload,'API_FOOTBALL');
