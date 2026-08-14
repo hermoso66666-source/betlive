@@ -70,12 +70,40 @@ export function createVirtualSportEngine({pool,deterministicUuid,config}){
       form:[Math.max(0,pct-12),Math.min(100,pct+12)]
     };
   }
-  function clampOdd(v){return Number(Math.max(1.18,Math.min(4.50,v)).toFixed(2));}
+  function clampOdd(v){return Number(Math.max(1.18,Math.min(8.00,v)).toFixed(2));}
+  function winnerProbabilities(event, seed){
+    const h=Number(event.home_score)||0,a=Number(event.away_score)||0;
+    const diff=h-a;
+    const elapsed=cfg.durationMinutes>0?Math.max(0,Math.min(1,Number(event.live_elapsed||0)/cfg.durationMinutes)):0;
+    const randomBias=.50+(((seed%21)-10)/500);
+    if(String(event.status||'')!=='LIVE' || elapsed<=0){
+      return [randomBias,1-randomBias];
+    }
+    if(diff===0){
+      const bias=.50+(((seed>>5)%17)-8)/300;
+      return [bias,1-bias];
+    }
+    const lead=clamp(.60+.18*elapsed+.045*Math.min(Math.abs(diff),3),.56,.90);
+    return diff>0?[lead,1-lead]:[1-lead,lead];
+  }
+  function winnerOdds(event, seed){
+    const [hp,ap]=winnerProbabilities(event,seed);
+    return [clampOdd(1/(hp*1.06)),clampOdd(1/(ap*1.06))];
+  }
+  function winnerOdds1X2(event, seed){
+    const [hp,ap]=winnerProbabilities(event,seed);
+    const elapsed=cfg.durationMinutes>0?Math.max(0,Math.min(1,Number(event.live_elapsed||0)/cfg.durationMinutes)):0;
+    let draw=String(event.status||'')==='LIVE' && (Number(event.home_score)||0)!==(Number(event.away_score)||0)
+      ? clamp(.22-.10*elapsed,.08,.22)
+      : .30;
+    const scale=1-draw;
+    const probs=[hp*scale,draw,ap*scale];
+    return probs.map(p=>clampOdd(1/(Math.max(.01,p)*1.045)));
+  }
   function markets(event){
     const h=Number(event.home_score)||0,a=Number(event.away_score)||0;
     const seed=hash(`${cfg.source}:${event.id}`);
-    const fav=clampOdd(1.42+((seed%15)/100));
-    const dog=clampOdd(2.18+(((seed>>4)%42)/100));
+    const [fav,dog]=winnerOdds(event,seed);
     const totalBase=Math.max(1,(h+a)+0.5);
     const over=clampOdd(1.58+(((seed>>8)%22)/100));
     const under=clampOdd(1.72+(((seed>>12)%28)/100));
@@ -85,9 +113,9 @@ export function createVirtualSportEngine({pool,deterministicUuid,config}){
     const altDog=clampOdd(2.02+(((seed>>2)%48)/100));
     const markets=[];
     if(cfg.sport==='Fútbol'){
-      const draw=clampOdd(2.85+((seed%30)/100));
+      const [fav1x2,draw1x2,dog1x2]=winnerOdds1X2(event,seed);
       markets.push({type:'MATCH_WINNER',name:'Ganador 1X2',selections:[
-        {code:'1',label:'Local',odds:fav},{code:'X',label:'Empate',odds:draw},{code:'2',label:'Visitante',odds:dog}
+        {code:'1',label:'Local',odds:fav1x2},{code:'X',label:'Empate',odds:draw1x2},{code:'2',label:'Visitante',odds:dog1x2}
       ]});
       markets.push({type:'TOTAL_GOALS',name:`Total de goles ${Math.floor(totalBase)}`,selections:[{code:'O',label:`Más de ${Math.floor(totalBase)}`,odds:over},{code:'U',label:`Menos de ${Math.floor(totalBase)}`,odds:under}]});
       markets.push({type:'HANDICAP',name:'Hándicap',selections:[{code:'H1',label:'Local -1',odds:handicapFav},{code:'H2',label:'Visitante +1',odds:handicapDog}]});

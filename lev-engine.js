@@ -31,7 +31,22 @@ export function generateLEVMarket({historical={},live={},betting={},config={}}={
   const betP=(ba+bd+bv)>0?normalize3(ba,bd,bv):[1/3,1/3,1/3];
   const totalW=Math.max(.0001,cfg.historyWeight+cfg.formWeight+cfg.liveWeight+cfg.bettingWeight);
   const hw=(cfg.historyWeight+cfg.formWeight)/totalW,lw=cfg.liveWeight/totalW,bw=cfg.bettingWeight/totalW;
-  const p=normalize3(base[0]*hw+liveP[0]*lw+betP[0]*bw,base[1]*hw+liveP[1]*lw+betP[1]*bw,base[2]*hw+liveP[2]*lw+betP[2]*bw);
+  let p=normalize3(base[0]*hw+liveP[0]*lw+betP[0]*bw,base[1]*hw+liveP[1]*lw+betP[1]*bw,base[2]*hw+liveP[2]*lw+betP[2]*bw);
+  // In-play rule: the team currently leading must not receive the underdog price.
+  // The score/time signal gets a strong final say so a one-goal lead cannot remain
+  // accidentally priced as a negative (favorite) outcome for the trailing team.
+  if(diff!==0){
+    const drawTarget=clamp(.22-.10*elapsed,.08,.22);
+    const winTarget=clamp(.60+.18*elapsed+.045*Math.min(Math.abs(diff),3),.56,.90);
+    const loseTarget=Math.max(.01,1-winTarget-drawTarget);
+    const target=diff>0?[winTarget,drawTarget,loseTarget]:[loseTarget,drawTarget,winTarget];
+    const scoreWeight=.72;
+    p=normalize3(
+      p[0]*(1-scoreWeight)+target[0]*scoreWeight,
+      p[1]*(1-scoreWeight)+target[1]*scoreWeight,
+      p[2]*(1-scoreWeight)+target[2]*scoreWeight
+    );
+  }
   const priced=normalize3(p[0]*(1+cfg.margin),p[1]*(1+cfg.margin),p[2]*(1+cfg.margin));
   const odds=priced.map(x=>clamp(1/Math.max(x,.0001),cfg.minOdds,cfg.maxOdds));
   return {selections:[
