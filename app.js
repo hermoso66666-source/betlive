@@ -61,22 +61,49 @@ async function loadHot(live=true){
     const d=await api('/api/events/hot?live=false');
     if(requestId!==viewRequestId)return;
     M=normalizeEvents(d.events);$("#viewTitle").textContent="🔥 HOT 2H2";
-    $("#feedNotice").textContent="🔥 HOT · partidos 2H2 de 8 minutos. Cada evento usa personajes y datos propios de la categoría HOT.";if(d.warning)$("#feedNotice").textContent+=" · Motor: "+d.warning;
-    $("#feedNotice").classList.remove("hidden");render();
+    $("#feedNotice").textContent="";
+    $("#feedNotice").classList.add("hidden");
+    render();
   }catch(e){if(requestId!==viewRequestId)return;$("#matches").innerHTML=`<div class=empty>No se pudo cargar HOT 2H2.<br><small>${escapeHtml(e.message)}</small><br><button id="retryHot" class="red" style="margin-top:12px">Reintentar</button></div>`;$("#retryHot")?.addEventListener("click",()=>loadHot(live));toast(e.message)}finally{if(requestId===viewRequestId)eventsLoading=false;}
 }
 async function loadRaces(upcoming=false){const requestId=++viewRequestId;eventsLoading=true;try{hotMode=false;raceMode=true;feedMode=upcoming?'race-upcoming':'race-live';liveOnly=!upcoming;$('#matches').innerHTML='<div class=empty>Cargando carreras...</div>';const d=await api(upcoming?'/api/races/upcoming':'/api/events/races');if(requestId!==viewRequestId)return;M=normalizeEvents(d.events);$('#viewTitle').textContent=upcoming?'🏎️ PRÓXIMAS CARRERAS':'🏎️ CARRERAS · EN VIVO';$('#feedNotice').textContent='🏎️ HOT · Carreras virtuales con motor propio y estadísticas generadas.';$('#feedNotice').classList.remove('hidden');render()}catch(e){if(requestId===viewRequestId)toast(e.message)}finally{if(requestId===viewRequestId)eventsLoading=false;}}
 async function loadMe(){try{let d=await api("/api/me");user=d.user;$("#balance").textContent=money(user.balance_cents);$("#account").textContent=(user.name||"U")[0].toUpperCase()}catch{user=null;$("#balance").textContent="$0.00"}}
 async function loadTickets(mode="all"){
-  if(!user){$("#history").innerHTML="<div class=empty>Inicia sesión para ver tus apuestas.</div>";return}
+  if(!user){
+    $("#history").innerHTML="<div class=empty>Inicia sesión para ver tus apuestas.</div>";
+    return;
+  }
   try{
-    const endpoint=mode==="pending"?"/api/bets/pending":"/api/bets/history";
-    const d=await api(endpoint);
-    const title=mode==="pending"?"Apuestas pendientes":"Historial de apuestas";
-    $("#bets h2").textContent=title;
-    $("#history").innerHTML=d.tickets.length?d.tickets.map(t=>{const status=t.status==='PENDING'?'Pendiente':t.status==='WON'?'Ganada':t.status==='LOST'?'Perdida':t.status==='VOID'?'Anulada':t.status;const sels=(t.selections||[]).map(s=>`<div><b>${escapeHtml(s.home||'')}</b> vs <b>${escapeHtml(s.away||'')}</b><small>${escapeHtml(s.league||'')} · ${escapeHtml(s.label||'')} · Cuota ${Number(s.odds||0).toFixed(2)}</small></div>`).join('');return `<div class="bet-card"><div class="bet-card-top"><b>${money(t.stake_cents)} · Cuota ${Number(t.total_odds).toFixed(2)}</b><span class="bet-status ${t.status.toLowerCase()}">${status}</span></div><small>${new Date(t.created_at).toLocaleString('es-MX')} · Potencial ${money(t.potential_cents)}</small><div class="bet-selections">${sels}</div></div>`}).join(""):"<div class=empty>No hay apuestas en esta sección.</div>";
-  }catch(e){toast(e.message)}
+    // /api/bets/history is the canonical user-scoped source. The fallback keeps
+    // older deployments working while they are being restarted.
+    let d;
+    try{
+      d=await api(mode==="pending"?"/api/bets/pending":"/api/bets/history");
+    }catch(e){
+      if(mode!=="pending") d=await api("/api/tickets"); else throw e;
+    }
+    const tickets=Array.isArray(d.tickets)?d.tickets:[];
+    const summary=d.summary||{total:tickets.length,open:tickets.filter(t=>t.status==="PENDING").length,won:tickets.filter(t=>t.status==="WON").length,lost:tickets.filter(t=>t.status==="LOST").length,voided:tickets.filter(t=>t.status==="VOID").length};
+    $("#bets h2").textContent="Mis apuestas";
+    $("#history").innerHTML=`
+      <div class="bets-summary">
+        <div><small>Abiertas</small><b>${Number(summary.open||0)}</b></div>
+        <div><small>Ganadoras</small><b>${Number(summary.won||0)}</b></div>
+        <div><small>Perdedoras</small><b>${Number(summary.lost||0)}</b></div>
+        <div><small>Total</small><b>${Number(summary.total||0)}</b></div>
+      </div>
+      <div class="bets-sync">Actualizado ${new Date().toLocaleTimeString("es-MX",{hour:"2-digit",minute:"2-digit",second:"2-digit"})} · Tus apuestas están vinculadas a tu cuenta.</div>
+      ${tickets.length?tickets.map(t=>{
+        const status=t.status==='PENDING'?'Abierta':t.status==='WON'?'Ganada':t.status==='LOST'?'Perdida':t.status==='VOID'?'Anulada':t.status;
+        const sels=(t.selections||[]).map(s=>`<div><b>${escapeHtml(s.home||'')}</b> vs <b>${escapeHtml(s.away||'')}</b><small>${escapeHtml(s.league||'')} · ${escapeHtml(s.label||'')} · Momio ${americanOdds(s.odds)} (${Number(s.odds||0).toFixed(2)})</small></div>`).join('');
+        return `<div class="bet-card"><div class="bet-card-top"><b>${money(t.stake_cents)} · Cuota ${Number(t.total_odds).toFixed(2)}</b><span class="bet-status ${String(t.status).toLowerCase()}">${status}</span></div><small>${new Date(t.created_at).toLocaleString('es-MX')} · Pago potencial ${money(t.potential_cents)}</small><div class="bet-selections">${sels}</div></div>`;
+      }).join(""):"<div class=empty>No tienes apuestas registradas todavía.</div>"}`;
+  }catch(e){
+    $("#history").innerHTML=`<div class=empty>No se pudieron cargar tus apuestas.<br><small>${escapeHtml(e.message)}</small><br><button id="retryBets" class="red" style="margin-top:12px">Reintentar</button></div>`;
+    $("#retryBets")?.addEventListener("click",()=>loadTickets(mode));
+  }
 }
+
 const escapeHtml=v=>String(v??"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 
 function render(){
@@ -140,7 +167,16 @@ $$('[data-sport]').forEach(b=>b.onclick=()=>{hotMode=false;raceMode=false;sport=
 $$('[data-hot]').forEach(b=>b.onclick=()=>{raceMode=false;loadHot(true)});$$('[data-races]').forEach(b=>b.onclick=()=>loadRaces(false));$$('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;$$('[data-filter]').forEach(x=>x.classList.toggle("active",x===b));render()});$("#search").oninput=render;$("#stake").oninput=renderSlip;$$('.quickmoney button').forEach(b=>b.onclick=()=>{$("#stake").value=Number(b.dataset.a);renderSlip()});$("#clear").onclick=()=>{slip=[];render()};$$('[data-type]').forEach(b=>b.onclick=()=>{type=b.dataset.type;$$('[data-type]').forEach(x=>x.classList.toggle("active",x===b));if(type==="single"&&slip.length>1)slip=slip.slice(-1);render()});
 $$('[data-tab]').forEach(b=>b.onclick=()=>{quickMode=b.dataset.tab==="quick";$("#normalPanel").classList.toggle("hidden",quickMode);$("#quickPanel").classList.toggle("hidden",!quickMode);$$('[data-tab]').forEach(x=>x.classList.toggle("active",x===b))});
 $("#menu").onclick=()=>$("#drawer").classList.remove("hidden");$("#closeDrawer").onclick=()=>$("#drawer").classList.add("hidden");$("#drawerLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadEvents(true)};$("#drawerUpcoming").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadUpcoming()};$("#showUpcoming").onclick=async()=>{hotMode=false;$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadUpcoming()};$("#showHotUpcoming").onclick=async()=>{raceMode=false;await loadHot(false)};$("#showRaceUpcoming").onclick=async()=>loadRaces(true);$("#drawerPromos").onclick=()=>openPromos();$("#drawerNotifications").onclick=()=>openNotifications();$("#drawerBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");$("#drawer").classList.add("hidden");loadTickets("all")};$("#drawerPending").onclick=()=>{$("#drawer").classList.add("hidden");loadWithdrawalRequests()};$("#drawerProfile").onclick=()=>{$("#drawer").classList.add("hidden");openProfile()};$("#drawerHelp").onclick=()=>{$("#drawer").classList.add("hidden");openSupport()};$("#mobileSlip").onclick=()=>$("#betSlip").classList.toggle("mobile-open");$("#ticketTop").onclick=()=>{if(window.innerWidth<=700)$("#mobileSlip").click();else document.querySelector(".slip").scrollIntoView({behavior:"smooth"})};
-$("#showBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");loadTickets("all")};$("#showLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadEvents(true)};
+$("#showBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");loadTickets("all")};
+let betsSyncTimer=null;
+function startBetsSync(){
+  clearInterval(betsSyncTimer);
+  betsSyncTimer=setInterval(()=>{
+    if(document.visibilityState==="visible"&&!$("#bets").classList.contains("hidden")&&user)loadTickets("all");
+  },5000);
+}
+startBetsSync();
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&!$("#bets").classList.contains("hidden")&&user)loadTickets("all")});$("#showLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadEvents(true)};
 function openAuth(){if(user){toast("Sesión activa");return}$("#auth").classList.remove("hidden");$("#loginBox").classList.remove("hidden");$("#registerBox").classList.add("hidden")}$("#account").onclick=openAuth;$("#closeAuth").onclick=()=>$("#auth").classList.add("hidden");$("#registerLink").onclick=()=>{$("#loginBox").classList.add("hidden");$("#registerBox").classList.remove("hidden")};$("#loginLink").onclick=()=>{$("#registerBox").classList.add("hidden");$("#loginBox").classList.remove("hidden")};
 $("#register").onclick=async()=>{try{let n=$("#rn").value.trim(),c=$("#rc").value.trim(),p=$("#rp").value;if(!n||!c||p.length<8)return toast("Completa los datos");let body=c.includes("@")?{name:n,email:c,password:p}:{name:n,phone:c,password:p};let d=await api("/api/auth/register",{method:"POST",body:JSON.stringify(body)});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Cuenta creada ✓")}catch(e){toast(e.message)}};
 $("#login").onclick=async()=>{try{let d=await api("/api/auth/login",{method:"POST",body:JSON.stringify({identifier:$("#lc").value.trim(),password:$("#lp").value})});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Sesión iniciada ✓")}catch(e){toast(e.message)}};

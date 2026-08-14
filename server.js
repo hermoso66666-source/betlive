@@ -677,14 +677,29 @@ app.post("/api/tickets",auth,ticketLimiter,async(req,res)=>{
 });
 
 // Wallet requests
-// Player betting history / pending bets
+// Player betting history / pending bets. All data is scoped to the authenticated user,
+// so the same account can safely see the same tickets from multiple devices.
 app.get("/api/bets/history",auth,async(req,res)=>{
-  const {rows}=await pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200",[req.user.id]);
-  res.json({tickets:rows});
+  try{
+    const [tickets,summary]=await Promise.all([
+      pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200",[req.user.id]),
+      pool.query(`SELECT COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status='PENDING')::int AS open,
+        COUNT(*) FILTER (WHERE status='WON')::int AS won,
+        COUNT(*) FILTER (WHERE status='LOST')::int AS lost,
+        COUNT(*) FILTER (WHERE status='VOID')::int AS voided
+        FROM tickets WHERE user_id=$1`,[req.user.id])
+    ]);
+    res.set("Cache-Control","private, no-store");
+    res.json({tickets:tickets.rows,summary:summary.rows[0]});
+  }catch(e){console.error("bets/history",e);res.status(500).json({error:"No se pudieron cargar tus apuestas"})}
 });
 app.get("/api/bets/pending",auth,async(req,res)=>{
-  const {rows}=await pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at FROM tickets WHERE user_id=$1 AND status='PENDING' ORDER BY created_at DESC LIMIT 100",[req.user.id]);
-  res.json({tickets:rows});
+  try{
+    const {rows}=await pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 AND status='PENDING' ORDER BY created_at DESC LIMIT 100",[req.user.id]);
+    res.set("Cache-Control","private, no-store");
+    res.json({tickets:rows});
+  }catch(e){console.error("bets/pending",e);res.status(500).json({error:"No se pudieron cargar tus apuestas abiertas"})}
 });
 
 // Support chat
