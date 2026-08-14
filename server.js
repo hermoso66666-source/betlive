@@ -138,6 +138,9 @@ async function dbInit(){
    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',selections JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),settled_at TIMESTAMPTZ
  );
  CREATE INDEX IF NOT EXISTS idx_tickets_user_created ON tickets(user_id,created_at DESC);
+ ALTER TABLE tickets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
+ ALTER TABLE tickets ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'PENDING';
+ ALTER TABLE tickets ADD COLUMN IF NOT EXISTS selections JSONB NOT NULL DEFAULT '[]'::jsonb;
  CREATE TABLE IF NOT EXISTS quinielas(
    id UUID PRIMARY KEY,name VARCHAR(100) NOT NULL,kind VARCHAR(30) NOT NULL,price_cents BIGINT NOT NULL CHECK(price_cents>=0),description TEXT DEFAULT '',
    active BOOLEAN NOT NULL DEFAULT TRUE,close_at TIMESTAMPTZ,prize_text VARCHAR(255) DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -681,27 +684,15 @@ app.post("/api/tickets",auth,ticketLimiter,async(req,res)=>{
 // so the same account can safely see the same tickets from multiple devices.
 app.get("/api/bets/history",auth,async(req,res)=>{
   try{
-    const [tickets,summary]=await Promise.all([
-      pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200",[req.user.id]),
-      pool.query(`SELECT COUNT(*)::int AS total,
-        COUNT(*) FILTER (WHERE status='PENDING')::int AS open,
-        COUNT(*) FILTER (WHERE status='WON')::int AS won,
-        COUNT(*) FILTER (WHERE status='LOST')::int AS lost,
-        COUNT(*) FILTER (WHERE status='VOID')::int AS voided
-        FROM tickets WHERE user_id=$1`,[req.user.id])
-    ]);
-    res.set("Cache-Control","private, no-store");
-    res.json({tickets:tickets.rows,summary:summary.rows[0]});
-  }catch(e){console.error("bets/history",e);res.status(500).json({error:"No se pudieron cargar tus apuestas"})}
+    const {rows}=await pool.query(`SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200`,[req.user.id]);
+    const summary={total:rows.length,open:rows.filter(x=>x.status==='PENDING').length,won:rows.filter(x=>x.status==='WON').length,lost:rows.filter(x=>x.status==='LOST').length,voided:rows.filter(x=>x.status==='VOID').length};
+    res.set('Cache-Control','private, no-store'); res.json({ok:true,tickets:rows,summary});
+  }catch(e){console.error('bets/history:',e);res.status(500).json({ok:false,error:'No se pudo generar el historial de apuestas'});}
 });
 app.get("/api/bets/pending",auth,async(req,res)=>{
-  try{
-    const {rows}=await pool.query("SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 AND status='PENDING' ORDER BY created_at DESC LIMIT 100",[req.user.id]);
-    res.set("Cache-Control","private, no-store");
-    res.json({tickets:rows});
-  }catch(e){console.error("bets/pending",e);res.status(500).json({error:"No se pudieron cargar tus apuestas abiertas"})}
+  try{const {rows}=await pool.query(`SELECT id,stake_cents,total_odds,potential_cents,status,selections,created_at,settled_at FROM tickets WHERE user_id=$1 AND status='PENDING' ORDER BY created_at DESC LIMIT 100`,[req.user.id]);res.set('Cache-Control','private, no-store');res.json({ok:true,tickets:rows,summary:{total:rows.length,open:rows.length,won:0,lost:0,voided:0}});}
+  catch(e){console.error('bets/pending:',e);res.status(500).json({ok:false,error:'No se pudieron cargar tus apuestas abiertas'});}
 });
-
 // Support chat
 app.get("/api/support/messages",auth,async(req,res)=>{
   const {rows}=await pool.query("SELECT id,sender_role,message,created_at,read_at FROM support_messages WHERE user_id=$1 ORDER BY created_at ASC LIMIT 300",[req.user.id]);
@@ -750,9 +741,37 @@ app.patch("/api/admin/users/:id",auth,requireAdmin,async(req,res)=>{
 app.patch("/api/admin/users/:id/status",auth,requireAdmin,async(req,res)=>{const active=Boolean(req.body.active);if(req.params.id===req.user.id&&!active)return res.status(400).json({error:"No puedes bloquear tu propia cuenta"});const {rows}=await pool.query("UPDATE users SET active=$1 WHERE id=$2 RETURNING id,name,email,phone,balance_cents,role,active,created_at",[active,req.params.id]);if(!rows[0])return res.status(404).json({error:"Usuario no encontrado"});await audit(req.user.id,active?"ACTIVATE_USER":"BLOCK_USER","user",req.params.id);res.json({user:rows[0]})});
 app.post("/api/admin/users/:id/balance",auth,requireAdmin,async(req,res)=>{const amount=Math.trunc(Number(req.body.amountCents)),reason=String(req.body.reason||"").trim().slice(0,255);if(!Number.isSafeInteger(amount)||amount===0||!reason)return res.status(400).json({error:"Monto o motivo inválido"});const client=await pool.connect();try{await client.query("BEGIN");const u=await client.query("SELECT balance_cents FROM users WHERE id=$1 FOR UPDATE",[req.params.id]);if(!u.rows[0])throw new Error("Usuario no encontrado");const next=BigInt(u.rows[0].balance_cents)+BigInt(amount);if(next<0n)throw new Error("El saldo no puede quedar negativo");await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next.toString(),req.params.id]);await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,type,amount_cents,balance_after_cents,reason) VALUES($1,$2,$3,'ADMIN_ADJUSTMENT',$4,$5,$6)",[crypto.randomUUID(),req.params.id,req.user.id,amount,next.toString(),reason]);await client.query("COMMIT");await audit(req.user.id,"BALANCE_ADJUSTMENT","user",req.params.id,{amount,reason});res.json({ok:true,balance_cents:next.toString()})}catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}});
 app.get("/api/admin/users/:id/transactions",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT bt.id,bt.type,bt.amount_cents,bt.balance_after_cents,bt.reason,bt.created_at,COALESCE(a.name,'Sistema') admin_name FROM balance_transactions bt LEFT JOIN users a ON a.id=bt.admin_id WHERE bt.user_id=$1 ORDER BY bt.created_at DESC LIMIT 200`,[req.params.id]);res.json({transactions:rows})});
-app.get("/api/admin/tickets",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT t.id,t.stake_cents,t.total_odds,t.potential_cents,t.status,t.selections,t.created_at,t.settled_at,u.name user_name,u.email user_email FROM tickets t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 300`);res.json({tickets:rows})});
-app.post("/api/admin/tickets/:id/settle",auth,requireAdmin,async(req,res)=>{const status=String(req.body.status||"").toUpperCase();if(!['WON','LOST','VOID'].includes(status))return res.status(400).json({error:"Estado inválido"});const client=await pool.connect();try{await client.query("BEGIN");const q=await client.query("SELECT * FROM tickets WHERE id=$1 FOR UPDATE",[req.params.id]);if(!q.rows[0])throw new Error("Ticket no encontrado");if(q.rows[0].status!=="PENDING")throw new Error("El ticket ya fue liquidado");const t=q.rows[0];let credit=0;if(status==='WON')credit=Number(t.potential_cents);if(status==='VOID')credit=Number(t.stake_cents);const u=await client.query("SELECT balance_cents FROM users WHERE id=$1 FOR UPDATE",[t.user_id]);const next=(BigInt(u.rows[0].balance_cents)+BigInt(credit)).toString();await client.query("UPDATE tickets SET status=$1,settled_at=NOW() WHERE id=$2",[status,t.id]);if(credit>0){await client.query("UPDATE users SET balance_cents=$1 WHERE id=$2",[next,t.user_id]);await client.query("INSERT INTO balance_transactions(id,user_id,admin_id,type,amount_cents,balance_after_cents,reason,reference_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[crypto.randomUUID(),t.user_id,req.user.id,status,credit,next,`Liquidación ${status} ${t.id}`,t.id])}await client.query("COMMIT");await audit(req.user.id,"SETTLE_TICKET","ticket",t.id,{status,credit});res.json({ok:true,status})}catch(e){await client.query("ROLLBACK");res.status(400).json({error:e.message})}finally{client.release()}});
 
+function parseLine(label,fallbackName=''){
+  const m=String(label||fallbackName||'').match(/(?:más|menos|over|under)\s*(?:de\s*)?([0-9]+(?:\.[0-9]+)?)/i);
+  return m?Number(m[1]):null;
+}
+function selectionOutcome(sel,event){
+  if(String(event.status||'').toUpperCase()!=='CLOSED') return null;
+  const h=Number(event.home_score)||0,a=Number(event.away_score)||0,code=String(sel.code||'').toUpperCase(),label=String(sel.label||'').toLowerCase(),type=String(sel.market_type||'').toUpperCase(),total=h+a;
+  if(type.includes('RACE_WINNER')){const winner=String(event.race_winner||'').trim();return winner?(String(sel.label||'').trim()===winner||String(sel.code||'').trim()===winner):null;}
+  if(type.includes('MATCH_WINNER')||type.includes('WINNER')||type==='INTERNAL_LEV'){
+    if(h===a){if(['E','X','DRAW'].includes(code)||label.includes('empate'))return true;if(['L','H','1','V','A','2'].includes(code)||label.includes('local')||label.includes('visitante'))return false;}
+    else{const homeWin=h>a;if(['L','H','1'].includes(code)||label.includes('local'))return homeWin;if(['V','A','2'].includes(code)||label.includes('visitante'))return !homeWin;if(['E','X','DRAW'].includes(code)||label.includes('empate'))return false;}
+  }
+  if(type.includes('TOTAL')&&!type.includes('TEAM_TOTAL')){const line=parseLine(sel.label,sel.market_name);if(line==null)return null;if(code.startsWith('O')||label.includes('más')||label.includes('over'))return total>line;if(code.startsWith('U')||label.includes('menos')||label.includes('under'))return total<line;}
+  if(type.includes('TEAM_TOTAL')||type.includes('TEAM_RUNS')){const line=parseLine(sel.label,sel.market_name);if(line==null)return null;const value=code.startsWith('V')||label.includes('visitante')?a:h;if(code.endsWith('O')||code.startsWith('O')||label.includes('más')||label.includes('over'))return value>line;if(code.endsWith('U')||code.startsWith('U')||label.includes('menos')||label.includes('under'))return value<line;}
+  if(type.includes('BOTH_SCORE')){const both=h>0&&a>0;if(['Y','YES','BTTS_Y'].includes(code)||label==='sí'||label.includes('ambos'))return both;if(['N','NO','BTTS_N'].includes(code)||label==='no')return !both;}
+  return null;
+}
+async function settleFinishedTickets(){
+  const pending=await pool.query(`SELECT id,user_id,stake_cents,potential_cents,status,selections FROM tickets WHERE status='PENDING' ORDER BY created_at LIMIT 500`);
+  if(!pending.rows.length)return {checked:0,settled:0};
+  const ids=[...new Set(pending.rows.flatMap(t=>Array.isArray(t.selections)?t.selections:[]).map(s=>s.selectionId).filter(Boolean))];if(!ids.length)return {checked:pending.rows.length,settled:0};
+  const q=await pool.query(`SELECT s.id selection_id,s.code,s.label,m.market_type,m.name market_name,e.id event_id,e.status,e.home_score,e.away_score,e.race_winner FROM market_selections s JOIN markets m ON m.id=s.market_id JOIN sports_events e ON e.id=m.event_id WHERE s.id=ANY($1::uuid[])`,[ids]);
+  const bySel=new Map(q.rows.map(x=>[x.selection_id,x]));let settled=0;
+  for(const t of pending.rows){const sels=Array.isArray(t.selections)?t.selections:[];const outcomes=sels.map(s=>{const e=bySel.get(s.selectionId);return e?selectionOutcome({...s,...e},e):null});if(!outcomes.length||outcomes.some(x=>x===null))continue;const status=outcomes.every(Boolean)?'WON':'LOST';const credit=status==='WON'?BigInt(t.potential_cents):0n;const client=await pool.connect();try{await client.query('BEGIN');const locked=await client.query('SELECT tickets.id,tickets.user_id,tickets.status,users.balance_cents FROM tickets JOIN users ON users.id=tickets.user_id WHERE tickets.id=$1 FOR UPDATE',[t.id]);if(!locked.rows[0]||locked.rows[0].status!=='PENDING'){await client.query('ROLLBACK');continue;}const uid=locked.rows[0].user_id,current=BigInt(locked.rows[0].balance_cents),next=(current+credit).toString();await client.query("UPDATE tickets SET status=$1,settled_at=NOW() WHERE id=$2 AND status='PENDING'",[status,t.id]);if(credit>0n){await client.query('UPDATE users SET balance_cents=$1 WHERE id=$2',[next,uid]);await client.query(`INSERT INTO balance_transactions(id,user_id,type,amount_cents,balance_after_cents,reason,reference_id) VALUES($1,$2,$3,$4,$5,$6,$7)`,[crypto.randomUUID(),uid,status,credit.toString(),next,`Liquidación automática ${status} ${t.id}`,t.id]);}await client.query('COMMIT');settled++;}catch(e){await client.query('ROLLBACK');console.error('settle ticket',t.id,e.message)}finally{client.release();}}
+  return {checked:pending.rows.length,settled};
+}
+function startAutoSettlement(){const run=()=>settleFinishedTickets().catch(e=>console.error('AUTO SETTLEMENT:',e.message));setTimeout(run,5000);setInterval(run,5000);}
+
+app.get("/api/admin/tickets",auth,requireAdmin,async(req,res)=>{const {rows}=await pool.query(`SELECT t.id,t.stake_cents,t.total_odds,t.potential_cents,t.status,t.selections,t.created_at,t.settled_at,u.name user_name,u.email user_email FROM tickets t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 300`);res.json({tickets:rows})});
+app.post("/api/admin/tickets/:id/settle",auth,requireAdmin,async(req,res)=>res.status(403).json({error:"Las apuestas se liquidan automáticamente; el administrador no puede liquidarlas manualmente"}));
 
 // HOT / 2H2 controls
 app.get("/api/admin/hot/status",auth,requireAdmin,async(req,res)=>{
@@ -1486,4 +1505,5 @@ app.listen(PORT,()=>{console.log("BetLive API escuchando en "+PORT);dbInit().the
   virtualSportsManager=createVirtualSportsManager({pool,deterministicUuid});
   await virtualSportsManager.startAll();
   startRaceEngine();
+  startAutoSettlement();
 }).catch(e=>console.error("Error inicializando la base de datos:",e))});

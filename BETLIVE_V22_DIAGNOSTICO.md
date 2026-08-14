@@ -43,3 +43,7 @@ Sintaxis validada con Node.js para:
 - `sw.js`
 
 También se probó el motor L/E/V con marcadores 1-0, 0-1, 2-0 y 0-2: el equipo líder recibe cuota decimal menor a 2 (American negativa) y el equipo perdedor cuota decimal mayor a 2 (American positiva).
+
+
+## V24
+Historial robusto, liquidación automática de tickets y copy del hero actualizado.

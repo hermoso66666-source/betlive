@@ -69,37 +69,21 @@ async function loadHot(live=true){
 async function loadRaces(upcoming=false){const requestId=++viewRequestId;eventsLoading=true;try{hotMode=false;raceMode=true;feedMode=upcoming?'race-upcoming':'race-live';liveOnly=!upcoming;$('#matches').innerHTML='<div class=empty>Cargando carreras...</div>';const d=await api(upcoming?'/api/races/upcoming':'/api/events/races');if(requestId!==viewRequestId)return;M=normalizeEvents(d.events);$('#viewTitle').textContent=upcoming?'🏎️ PRÓXIMAS CARRERAS':'🏎️ CARRERAS · EN VIVO';$('#feedNotice').textContent='🏎️ HOT · Carreras virtuales con motor propio y estadísticas generadas.';$('#feedNotice').classList.remove('hidden');render()}catch(e){if(requestId===viewRequestId)toast(e.message)}finally{if(requestId===viewRequestId)eventsLoading=false;}}
 async function loadMe(){try{let d=await api("/api/me");user=d.user;$("#balance").textContent=money(user.balance_cents);$("#account").textContent=(user.name||"U")[0].toUpperCase()}catch{user=null;$("#balance").textContent="$0.00"}}
 async function loadTickets(mode="all"){
-  if(!user){
-    $("#history").innerHTML="<div class=empty>Inicia sesión para ver tus apuestas.</div>";
-    return;
-  }
+  if(!user){ $("#history").innerHTML="<div class=empty>Inicia sesión para ver tus apuestas.</div>"; return; }
   try{
-    // /api/bets/history is the canonical user-scoped source. The fallback keeps
-    // older deployments working while they are being restarted.
-    let d;
-    try{
-      d=await api(mode==="pending"?"/api/bets/pending":"/api/bets/history");
-    }catch(e){
-      if(mode!=="pending") d=await api("/api/tickets"); else throw e;
-    }
+    const d=await api(mode==="pending"?"/api/bets/pending":"/api/bets/history");
     const tickets=Array.isArray(d.tickets)?d.tickets:[];
     const summary=d.summary||{total:tickets.length,open:tickets.filter(t=>t.status==="PENDING").length,won:tickets.filter(t=>t.status==="WON").length,lost:tickets.filter(t=>t.status==="LOST").length,voided:tickets.filter(t=>t.status==="VOID").length};
+    const cards=tickets.map(t=>{
+      const status=t.status==='PENDING'?'Abierta':t.status==='WON'?'Ganada':t.status==='LOST'?'Perdida':t.status==='VOID'?'Anulada':t.status;
+      const sels=(t.selections||[]).map(s=>'<div><b>'+escapeHtml(s.home||'')+'</b> vs <b>'+escapeHtml(s.away||'')+'</b><small>'+escapeHtml(s.league||'')+' · '+escapeHtml(s.label||'')+' · Momio '+americanOdds(s.odds)+' ('+Number(s.odds||0).toFixed(2)+')</small></div>').join('');
+      const payout=t.status==='WON'?' · Cobrado '+money(t.potential_cents):t.status==='LOST'?' · Cobrado $0.00':t.status==='VOID'?' · Reembolso '+money(t.stake_cents):'';
+      return '<div class="bet-card"><div class="bet-card-top"><b>'+money(t.stake_cents)+' · Cuota '+Number(t.total_odds).toFixed(2)+'</b><span class="bet-status '+String(t.status).toLowerCase()+'">'+status+'</span></div><small>'+new Date(t.created_at).toLocaleString('es-MX')+' · Pago potencial '+money(t.potential_cents)+payout+'</small><div class="bet-selections">'+sels+'</div></div>';
+    }).join('');
     $("#bets h2").textContent="Mis apuestas";
-    $("#history").innerHTML=`
-      <div class="bets-summary">
-        <div><small>Abiertas</small><b>${Number(summary.open||0)}</b></div>
-        <div><small>Ganadoras</small><b>${Number(summary.won||0)}</b></div>
-        <div><small>Perdedoras</small><b>${Number(summary.lost||0)}</b></div>
-        <div><small>Total</small><b>${Number(summary.total||0)}</b></div>
-      </div>
-      <div class="bets-sync">Actualizado ${new Date().toLocaleTimeString("es-MX",{hour:"2-digit",minute:"2-digit",second:"2-digit"})} · Tus apuestas están vinculadas a tu cuenta.</div>
-      ${tickets.length?tickets.map(t=>{
-        const status=t.status==='PENDING'?'Abierta':t.status==='WON'?'Ganada':t.status==='LOST'?'Perdida':t.status==='VOID'?'Anulada':t.status;
-        const sels=(t.selections||[]).map(s=>`<div><b>${escapeHtml(s.home||'')}</b> vs <b>${escapeHtml(s.away||'')}</b><small>${escapeHtml(s.league||'')} · ${escapeHtml(s.label||'')} · Momio ${americanOdds(s.odds)} (${Number(s.odds||0).toFixed(2)})</small></div>`).join('');
-        return `<div class="bet-card"><div class="bet-card-top"><b>${money(t.stake_cents)} · Cuota ${Number(t.total_odds).toFixed(2)}</b><span class="bet-status ${String(t.status).toLowerCase()}">${status}</span></div><small>${new Date(t.created_at).toLocaleString('es-MX')} · Pago potencial ${money(t.potential_cents)}</small><div class="bet-selections">${sels}</div></div>`;
-      }).join(""):"<div class=empty>No tienes apuestas registradas todavía.</div>"}`;
+    $("#history").innerHTML='<div class="bets-summary"><div><small>Abiertas</small><b>'+Number(summary.open||0)+'</b></div><div><small>Ganadoras</small><b>'+Number(summary.won||0)+'</b></div><div><small>Perdedoras</small><b>'+Number(summary.lost||0)+'</b></div><div><small>Total</small><b>'+Number(summary.total||0)+'</b></div></div><div class="bets-sync">Actualizado '+new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'})+'</div>'+(cards||'<div class=empty>No tienes apuestas registradas todavía.</div>');
   }catch(e){
-    $("#history").innerHTML=`<div class=empty>No se pudieron cargar tus apuestas.<br><small>${escapeHtml(e.message)}</small><br><button id="retryBets" class="red" style="margin-top:12px">Reintentar</button></div>`;
+    $("#history").innerHTML='<div class=empty>No se pudo generar el historial de apuestas.<br><small>'+escapeHtml(e.message||'Error de conexión')+'</small><br><button id="retryBets" class="red" style="margin-top:12px">Reintentar</button></div>';
     $("#retryBets")?.addEventListener("click",()=>loadTickets(mode));
   }
 }
