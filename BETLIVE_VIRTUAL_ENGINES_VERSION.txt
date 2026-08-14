@@ -1,1 +1,1 @@
-V19 — Independent virtual engines; no API-Football dependency in simulated modules
+V21 — Motores simulados independientes; reloj en tiempo real y actualización de mercados sin recarga de eventos

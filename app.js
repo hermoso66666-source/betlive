@@ -1,75 +1,71 @@
 let M=[],sport="Todos",filter="all",slip=[],type="single",quick=null,quickMode=false,user=null,liveOnly=true,feedMode="live",hotMode=false,raceMode=false;
+let viewRequestId=0,eventsLoading=false;
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s),money=c=>"$"+(Number(c)/100).toLocaleString("es-MX",{minimumFractionDigits:2}),americanOdds=o=>{const d=Number(o);if(!Number.isFinite(d)||d<=1)return "—";const a=d>=2?Math.round((d-1)*100):Math.round(-100/(d-1));return a>0?`+${a}`:`${a}`},displayOdds=o=>`${americanOdds(o)} <small class="decimal-odds">(${Number(o).toFixed(2)})</small>`,toast=t=>{let x=$("#toast");x.textContent=t;x.classList.add("show");setTimeout(()=>x.classList.remove("show"),1800)};
 async function api(url,opt={}){let r=await fetch(url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opt.headers||{})},...opt});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||"Error");return d}
 function normalizeEvents(events){return events.map(e=>{
   const markets=(e.markets||[]).map(m=>({...m,selections:(m.selections||[]).map(s=>({...s,odds:Number(s.odds)}))}));
   const odds=markets.flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})));
-  return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,hotStats:e.hot_stats||null,raceStats:e.race_stats||null,hot:e.hot_enabled===true||String(e.external_source||"").startsWith("HOT_")||e.external_source==="HOT_ENGINE",race:e.race_enabled===true||e.external_source==="RACE_ENGINE",markets,odds}
+  return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,durationSeconds:Number(e.sim_duration_seconds||e.duration_seconds||0)||0,hotStats:e.hot_stats||null,raceStats:e.race_stats||null,hot:e.hot_enabled===true||String(e.external_source||"").startsWith("HOT_")||e.external_source==="HOT_ENGINE",race:e.race_enabled===true||e.external_source==="RACE_ENGINE",markets,odds}
 })}
 async function loadEvents(forceLive=true){
   const requestedSport=sport;
+  const requestId=++viewRequestId;
+  eventsLoading=true;
   try{
     hotMode=false;raceMode=false;liveOnly=forceLive;
-    feedMode=requestedSport==='Todos'?'catalog':'football';
-    $('#events').classList.remove('hidden');$('#bets').classList.add('hidden');
-    $('#matches').innerHTML='<div class=empty>Cargando '+(requestedSport==='Todos'?'eventos':'fútbol en vivo')+'...</div>';
+    const virtualSports=["Básquetbol","Béisbol","Tenis","Hockey"];
     let events=[];
-    if(requestedSport==='Todos'){
+    // Never use the global football feed for virtual sports. Each module has its own endpoint.
+    if(requestedSport==="Todos"){
+      feedMode="catalog";
       const results=await Promise.allSettled([
-        api('/api/football/live'),
+        api('/api/events?live=true'),
         api('/api/virtual/all?live=false')
       ]);
-      events=results.filter(r=>r.status==='fulfilled').flatMap(r=>r.value?.events||[]);
-      if(!events.length && results.every(r=>r.status!=='fulfilled')) throw new Error('No se pudo cargar ningún módulo');
-    }else{
-      const d=await api('/api/football/live');
+      events=results.filter(r=>r.status==="fulfilled").flatMap(r=>r.value?.events||[]);
+      if(!events.length && results.every(r=>r.status!=="fulfilled")) throw new Error("No se pudo cargar ningún motor");
+    }else if(virtualSports.includes(requestedSport)){
+      feedMode="virtual";
+      // Virtual categories show their own OPEN/LIVE stream; they do not wait for real live data.
+      const d=await api(`/api/virtual/${encodeURIComponent(requestedSport)}?live=false`);
       events=d.events||[];
+    }else if(requestedSport==="Fútbol"){
+      feedMode="football";
+      const d=await api('/api/events?live=true');
+      events=d.events||[];
+    }else{
+      feedMode="catalog";
     }
-    if(sport!==requestedSport)return;
+    // Ignore late responses from a previous category click.
+    if(requestId!==viewRequestId || sport!==requestedSport) return;
     M=normalizeEvents(events);
-    $('#viewTitle').textContent=requestedSport==='Todos'?'🔴 EN VIVO + VIRTUALES':'⚽ FÚTBOL · EN VIVO';
-    $('#feedNotice').classList.add('hidden');
+    $("#viewTitle").textContent=requestedSport==="Todos"?"🔴 EN VIVO + VIRTUALES":` ${requestedSport}`.trim();
+    $("#feedNotice").classList.add("hidden");
     render();
   }catch(e){
-    if(sport!==requestedSport)return;
-    M=[];$('#count').textContent='0 eventos';
-    $('#matches').innerHTML=`<div class=empty>No se pudo cargar <b>${escapeHtml(requestedSport)}</b>.<br><small>${escapeHtml(e.message)}</small></div>`;
+    if(requestId!==viewRequestId || sport!==requestedSport)return;
+    M=[];
+    $("#count").textContent="0 eventos";
+    $("#matches").innerHTML=`<div class="empty">No se pudo cargar <b>${escapeHtml(requestedSport)}</b>.<br><small>${escapeHtml(e.message)}</small></div>`;
     toast(e.message);
-  }
+  }finally{if(requestId===viewRequestId)eventsLoading=false;}
 }
-async function loadVirtualSport(selectedSport){
-  const requestedSport=selectedSport;
-  try{
-    hotMode=false;raceMode=false;feedMode='virtual';liveOnly=false;sport=requestedSport;
-    $('#events').classList.remove('hidden');$('#bets').classList.add('hidden');
-    $('#matches').innerHTML=`<div class=empty>Cargando ${escapeHtml(requestedSport)} simulado...</div>`;
-    const d=await api(`/api/virtual/${encodeURIComponent(requestedSport)}?live=false`);
-    if(sport!==requestedSport)return;
-    M=normalizeEvents(d.events||[]);
-    $('#viewTitle').textContent=`🎮 ${requestedSport.toUpperCase()} · SIMULADO`;
-    $('#feedNotice').textContent=`🎮 ${requestedSport} usa exclusivamente su motor virtual independiente. No consulta partidos reales ni API-Football.`;
-    $('#feedNotice').classList.remove('hidden');
-    render();
-  }catch(e){
-    if(sport!==requestedSport)return;
-    M=[];$('#count').textContent='0 eventos';
-    $('#matches').innerHTML=`<div class=empty>No se pudo cargar <b>${escapeHtml(requestedSport)}</b> simulado.<br><small>${escapeHtml(e.message)}</small></div>`;
-    toast(e.message);
-  }
-}
-async function loadUpcoming(){try{hotMode=false;raceMode=false;feedMode="upcoming";liveOnly=false;$("#matches").innerHTML="<div class=empty>Cargando partidos reales...</div>";const d=await api("/api/events/upcoming-real");M=normalizeEvents(d.events);$("#viewTitle").textContent="📅 PRÓXIMOS PARTIDOS";const src=d.source||"BETLIVE";$("#feedNotice").textContent=d.error?`BetLive conserva los partidos disponibles. Fuente adicional no disponible: ${d.error}`:`Fuente: ${src}. Los mercados internos de BetLive no dependen de las cuotas externas.`;$("#feedNotice").classList.remove("hidden");render()}catch(e){$("#matches").innerHTML=`<div class=empty>No se pudieron cargar los próximos partidos.<br><small>${escapeHtml(e.message)}</small><br><button id="retryUpcoming" class="red" style="margin-top:12px">Reintentar</button></div>`;const b=$("#retryUpcoming");if(b)b.onclick=loadUpcoming;toast(e.message)}}
+async function loadUpcoming(){const requestId=++viewRequestId;eventsLoading=true;try{hotMode=false;raceMode=false;feedMode="upcoming";liveOnly=false;$("#matches").innerHTML="<div class=empty>Cargando partidos reales...</div>";const d=await api("/api/events/upcoming-real");if(requestId!==viewRequestId)return;M=normalizeEvents(d.events);$("#viewTitle").textContent="📅 PRÓXIMOS PARTIDOS";const src=d.source||"BETLIVE";$("#feedNotice").textContent=d.error?`BetLive conserva los partidos disponibles. Fuente adicional no disponible: ${d.error}`:`Fuente: ${src}. Los mercados internos de BetLive no dependen de las cuotas externas.`;$("#feedNotice").classList.remove("hidden");render()}catch(e){if(requestId!==viewRequestId)return;$("#matches").innerHTML=`<div class=empty>No se pudieron cargar los próximos partidos.<br><small>${escapeHtml(e.message)}</small><br><button id="retryUpcoming" class="red" style="margin-top:12px">Reintentar</button></div>`;const b=$("#retryUpcoming");if(b)b.onclick=loadUpcoming;toast(e.message)}finally{if(requestId===viewRequestId)eventsLoading=false;}}
 async function loadHot(live=true){
+  const requestId=++viewRequestId;
+  eventsLoading=true;
   try{
     hotMode=true;raceMode=false;feedMode="hot";liveOnly=false;
     $("#events").classList.remove("hidden");$("#bets").classList.add("hidden");
     $("#matches").innerHTML="<div class=empty>Cargando HOT 2H2...</div>";
     const d=await api('/api/events/hot?live=false');
+    if(requestId!==viewRequestId)return;
     M=normalizeEvents(d.events);$("#viewTitle").textContent="🔥 HOT 2H2";
     $("#feedNotice").textContent="🔥 HOT · partidos 2H2 de 8 minutos. Cada evento usa personajes y datos propios de la categoría HOT.";if(d.warning)$("#feedNotice").textContent+=" · Motor: "+d.warning;
     $("#feedNotice").classList.remove("hidden");render();
-  }catch(e){$("#matches").innerHTML=`<div class=empty>No se pudo cargar HOT 2H2.<br><small>${escapeHtml(e.message)}</small><br><button id="retryHot" class="red" style="margin-top:12px">Reintentar</button></div>`;$("#retryHot")?.addEventListener("click",()=>loadHot(live));toast(e.message)}
+  }catch(e){if(requestId!==viewRequestId)return;$("#matches").innerHTML=`<div class=empty>No se pudo cargar HOT 2H2.<br><small>${escapeHtml(e.message)}</small><br><button id="retryHot" class="red" style="margin-top:12px">Reintentar</button></div>`;$("#retryHot")?.addEventListener("click",()=>loadHot(live));toast(e.message)}finally{if(requestId===viewRequestId)eventsLoading=false;}
 }
-async function loadRaces(upcoming=false){try{hotMode=false;raceMode=true;feedMode=upcoming?'race-upcoming':'race-live';liveOnly=!upcoming;$('#matches').innerHTML='<div class=empty>Cargando carreras...</div>';const d=await api(upcoming?'/api/races/upcoming':'/api/events/races');M=normalizeEvents(d.events);$('#viewTitle').textContent=upcoming?'🏎️ PRÓXIMAS CARRERAS':'🏎️ CARRERAS · EN VIVO';$('#feedNotice').textContent='🏎️ HOT · Carreras virtuales con motor propio y estadísticas generadas.';$('#feedNotice').classList.remove('hidden');render()}catch(e){toast(e.message)}}
+async function loadRaces(upcoming=false){const requestId=++viewRequestId;eventsLoading=true;try{hotMode=false;raceMode=true;feedMode=upcoming?'race-upcoming':'race-live';liveOnly=!upcoming;$('#matches').innerHTML='<div class=empty>Cargando carreras...</div>';const d=await api(upcoming?'/api/races/upcoming':'/api/events/races');if(requestId!==viewRequestId)return;M=normalizeEvents(d.events);$('#viewTitle').textContent=upcoming?'🏎️ PRÓXIMAS CARRERAS':'🏎️ CARRERAS · EN VIVO';$('#feedNotice').textContent='🏎️ HOT · Carreras virtuales con motor propio y estadísticas generadas.';$('#feedNotice').classList.remove('hidden');render()}catch(e){if(requestId===viewRequestId)toast(e.message)}finally{if(requestId===viewRequestId)eventsLoading=false;}}
 async function loadMe(){try{let d=await api("/api/me");user=d.user;$("#balance").textContent=money(user.balance_cents);$("#account").textContent=(user.name||"U")[0].toUpperCase()}catch{user=null;$("#balance").textContent="$0.00"}}
 async function loadTickets(mode="all"){
   if(!user){$("#history").innerHTML="<div class=empty>Inicia sesión para ver tus apuestas.</div>";return}
@@ -83,12 +79,44 @@ async function loadTickets(mode="all"){
 }
 const escapeHtml=v=>String(v??"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 
+function isSimulatedEvent(m){return m.hot||m.race||String(m.source||"").startsWith("HOT_")||m.source==="RACE_ENGINE"}
+function gameClock(m){
+  if(!isSimulatedEvent(m))return null;
+  const duration=Math.max(1,Number(m.durationSeconds)||480),start=Date.parse(m.startsAt||"");
+  if(!Number.isFinite(start))return {elapsed:0,duration,display:"00:00",live:false,finished:m.status==="CLOSED"};
+  const raw=Math.floor((Date.now()-start)/1000),elapsed=Math.max(0,Math.min(duration,raw));
+  const live=raw>=0&&raw<duration&&m.status!=="CLOSED",finished=m.status==="CLOSED"||raw>=duration,shown=finished?duration:elapsed;
+  return {elapsed:shown,duration,display:`${String(Math.floor(shown/60)).padStart(2,"0")}:${String(shown%60).padStart(2,"0")}`,live,finished};
+}
+function updateSimulatedClocks(){
+  $$('.sim-clock').forEach(el=>{const m=M.find(x=>x.id===el.dataset.eventId);if(!m)return;const c=gameClock(m);if(!c)return;el.textContent=c.finished?`FINAL · ${c.display}`:`${c.live?'EN VIVO · ':''}${c.display}`;});
+}
+async function refreshMarketsOnly(){
+  if(document.visibilityState!=="visible"||eventsLoading||!M.length)return;
+  try{
+    const d=await api(`/api/markets/refresh?ids=${encodeURIComponent(M.map(x=>x.id).filter(Boolean).join(','))}`),byEvent=new Map();
+    for(const row of (d.markets||[])){
+      if(!byEvent.has(row.event_id))byEvent.set(row.event_id,[]);
+      const markets=byEvent.get(row.event_id);let mk=markets.find(x=>x.id===row.market_id);
+      if(!mk){mk={id:row.market_id,name:row.name,type:row.market_type,status:row.market_status,selections:[]};markets.push(mk);}
+      mk.selections.push({id:row.selection_id,code:row.code,label:row.label,odds:Number(row.odds),status:row.selection_status});
+    }
+    for(const m of M){if(byEvent.has(m.id)){const fresh=byEvent.get(m.id);m.markets=fresh;m.odds=fresh.flatMap(x=>(x.selections||[]).map(s=>({id:s.id,label:`${x.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:x.name,marketId:x.id})));}}
+    $$('.odd').forEach(btn=>{
+      const m=M.find(x=>x.id===btn.dataset.id),sel=m?.markets?.flatMap(x=>x.selections||[]).find(x=>x.id===btn.dataset.sid);if(!sel)return;
+      const label=btn.querySelector('small'),value=btn.querySelector('b');if(label)label.innerHTML=escapeHtml(sel.label);if(value)value.innerHTML=displayOdds(sel.odds);
+      btn.disabled=sel.status!=="OPEN"||m.status==="CLOSED";btn.classList.toggle('sel',slip.some(x=>x.selectionId===sel.id));
+      const chosen=slip.find(x=>x.selectionId===sel.id);if(chosen)chosen.odd=Number(sel.odds);
+    });
+    renderSlip();
+  }catch(e){console.warn("Market-only refresh:",e.message)}
+}
 function render(){
   let q=$("#search").value.toLowerCase(),a=M.filter(m=>(hotMode?m.hot:(raceMode?m.race:(sport==="Todos"||m.sport===sport)))&&(!q||(`${m.home} ${m.away} ${m.league}`).toLowerCase().includes(q))).filter(m=>filter==="all"||filter==="featured"&&m.featured||filter==="video"&&m.video||filter==="goals"&&(m.score[0]+m.score[1]>0));
   $("#count").textContent=a.length+" eventos";
   $("#matches").innerHTML=a.map(m=>{
     const isLive=m.status==="LIVE";
-    const time=isLive?(m.liveStatus?`${m.liveStatus}${m.liveElapsed!=null?` · ${m.liveElapsed}'`:""}`:"● EN VIVO"):(m.status==="OPEN"?"● PRÓXIMO":"● CERRADO");
+    const clock=gameClock(m); const time=clock?(clock.live?`🔴 EN VIVO · ${clock.display}`:(clock.finished?`FINAL · ${clock.display}`:`PRÓXIMO · ${clock.display}`)):(isLive?(m.liveStatus?`${m.liveStatus}${m.liveElapsed!=null?` · ${m.liveElapsed}'`:""}`:"● EN VIVO"):(m.status==="OPEN"?"● PRÓXIMO":"● CERRADO"));
     const visibleMarkets=(m.markets||[]).filter(x=>(x.selections||[]).length).slice(0,8);
     const raceStatsHtml=m.race&&m.raceStats?`<div class="hot-stats"><b>🏎️ HOT · Carrera</b><div><span>Vuelta: ${m.raceStats.lap??0}</span><span>${(m.raceStats.drivers||[]).slice().sort((a,b)=>a.position-b.position).slice(0,5).map(d=>`${escapeHtml(d.position)}. ${escapeHtml(d.name)}`).join(' · ')}</span></div></div>`:'';
     const marketHtml=visibleMarkets.map(mk=>`<div class="live-market"><b>${escapeHtml(mk.name)}</b><div class="live-market-options">${(mk.selections||[]).slice(0,6).map(s=>{
@@ -99,7 +127,7 @@ function render(){
     return `<article class="match">
       <div class="matchtop"><span>${escapeHtml(m.league)}</span><span class="live">${isLive?"🔴 ":""}${escapeHtml(time)}</span><span>${m.video?"▶ VIDEO":""}</span></div>
       <div class="event"><span>☆</span><div class="team">${escapeHtml(m.home)}<small>${m.score[0]}</small></div></div>
-      <div class="scoreline">${isLive?`Marcador en vivo · ${m.score[0]} - ${m.score[1]}`:""} </div>
+      <div class="scoreline">${isSimulatedEvent(m)?`Marcador · ${m.score[0]} - ${m.score[1]} <span class="sim-clock" data-event-id="${m.id}">${clock?.finished?`FINAL · ${clock.display}`:`${clock?.live?'EN VIVO · ':''}${clock?.display||'00:00'}`}</span>`:(isLive?`Marcador en vivo · ${m.score[0]} - ${m.score[1]}`:"")} </div>
       <div class="event" style="padding-top:0"><span></span><div class="team">${escapeHtml(m.away)}<small>${m.score[1]}</small></div></div>
       ${raceStatsHtml}${m.hot && m.hotStats ? `<div class="hot-stats"><b>🔥 HOT · Datos del partido</b><div><span>Win: ${m.hotStats.winPct?.[0]??0}% / ${m.hotStats.winPct?.[1]??0}% / ${m.hotStats.winPct?.[2]??0}%</span><span>Posesión: ${m.hotStats.possession?.[0]??0}% - ${m.hotStats.possession?.[1]??0}%</span><span>Tiros: ${m.hotStats.shots?.[0]??0} - ${m.hotStats.shots?.[1]??0}</span><span>Ataques: ${m.hotStats.attacks?.[0]??0} - ${m.hotStats.attacks?.[1]??0}</span></div></div>` : ''}
       ${marketHtml||'<div class="empty">Sin mercados disponibles en este momento.</div>'}
@@ -136,31 +164,18 @@ async function loadWithdrawalRequests(){
   }catch(e){toast(e.message)}
 }
 
-$$('[data-sport]').forEach(b=>b.onclick=()=>{
-  hotMode=false;raceMode=false;
-  const next=b.dataset.sport;
-  $('#drawer').classList.add('hidden');
-  if(['Básquetbol','Béisbol','Tenis','Hockey'].includes(next)) return loadVirtualSport(next);
-  sport=next;
-  return loadEvents(true);
-});
+$$('[data-sport]').forEach(b=>b.onclick=()=>{hotMode=false;raceMode=false;sport=b.dataset.sport;$("#drawer").classList.add("hidden");loadEvents(true)});
 $$('[data-hot]').forEach(b=>b.onclick=()=>{raceMode=false;loadHot(true)});$$('[data-races]').forEach(b=>b.onclick=()=>loadRaces(false));$$('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;$$('[data-filter]').forEach(x=>x.classList.toggle("active",x===b));render()});$("#search").oninput=render;$("#stake").oninput=renderSlip;$$('.quickmoney button').forEach(b=>b.onclick=()=>{$("#stake").value=Number(b.dataset.a);renderSlip()});$("#clear").onclick=()=>{slip=[];render()};$$('[data-type]').forEach(b=>b.onclick=()=>{type=b.dataset.type;$$('[data-type]').forEach(x=>x.classList.toggle("active",x===b));if(type==="single"&&slip.length>1)slip=slip.slice(-1);render()});
 $$('[data-tab]').forEach(b=>b.onclick=()=>{quickMode=b.dataset.tab==="quick";$("#normalPanel").classList.toggle("hidden",quickMode);$("#quickPanel").classList.toggle("hidden",!quickMode);$$('[data-tab]').forEach(x=>x.classList.toggle("active",x===b))});
-$("#menu").onclick=()=>$("#drawer").classList.remove("hidden");$("#closeDrawer").onclick=()=>$("#drawer").classList.add("hidden");$("#drawerLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadEvents(true)};$("#drawerUpcoming").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadUpcoming()};$("#showUpcoming").onclick=async()=>{hotMode=false;$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadUpcoming()};$("#showHotUpcoming").onclick=async()=>{raceMode=false;await loadHot(false)};$("#showRaceUpcoming").onclick=async()=>loadRaces(true);$("#drawerPromos").onclick=()=>{$('#drawer').classList.add('hidden');openPromos()};$("#drawerNotifications").onclick=()=>{$('#drawer').classList.add('hidden');openNotifications()};$("#drawerBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");$("#drawer").classList.add("hidden");loadTickets("all")};$("#drawerPending").onclick=()=>{$("#drawer").classList.add("hidden");loadWithdrawalRequests()};$("#drawerProfile").onclick=()=>{$("#drawer").classList.add("hidden");openProfile()};$("#drawerHelp").onclick=()=>{$("#drawer").classList.add("hidden");openSupport()};$("#mobileSlip").onclick=()=>$("#betSlip").classList.toggle("mobile-open");$("#ticketTop").onclick=()=>{if(window.innerWidth<=700)$("#mobileSlip").click();else document.querySelector(".slip").scrollIntoView({behavior:"smooth"})};
+$("#menu").onclick=()=>$("#drawer").classList.remove("hidden");$("#closeDrawer").onclick=()=>$("#drawer").classList.add("hidden");$("#drawerLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadEvents(true)};$("#drawerUpcoming").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadUpcoming()};$("#showUpcoming").onclick=async()=>{hotMode=false;$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadUpcoming()};$("#showHotUpcoming").onclick=async()=>{raceMode=false;await loadHot(false)};$("#showRaceUpcoming").onclick=async()=>loadRaces(true);$("#drawerPromos").onclick=()=>openPromos();$("#drawerNotifications").onclick=()=>openNotifications();$("#drawerBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");$("#drawer").classList.add("hidden");loadTickets("all")};$("#drawerPending").onclick=()=>{$("#drawer").classList.add("hidden");loadWithdrawalRequests()};$("#drawerProfile").onclick=()=>{$("#drawer").classList.add("hidden");openProfile()};$("#drawerHelp").onclick=()=>{$("#drawer").classList.add("hidden");openSupport()};$("#mobileSlip").onclick=()=>$("#betSlip").classList.toggle("mobile-open");$("#ticketTop").onclick=()=>{if(window.innerWidth<=700)$("#mobileSlip").click();else document.querySelector(".slip").scrollIntoView({behavior:"smooth"})};
 $("#showBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");loadTickets("all")};$("#showLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadEvents(true)};
 function openAuth(){if(user){toast("Sesión activa");return}$("#auth").classList.remove("hidden");$("#loginBox").classList.remove("hidden");$("#registerBox").classList.add("hidden")}$("#account").onclick=openAuth;$("#closeAuth").onclick=()=>$("#auth").classList.add("hidden");$("#registerLink").onclick=()=>{$("#loginBox").classList.add("hidden");$("#registerBox").classList.remove("hidden")};$("#loginLink").onclick=()=>{$("#registerBox").classList.add("hidden");$("#loginBox").classList.remove("hidden")};
 $("#register").onclick=async()=>{try{let n=$("#rn").value.trim(),c=$("#rc").value.trim(),p=$("#rp").value;if(!n||!c||p.length<8)return toast("Completa los datos");let body=c.includes("@")?{name:n,email:c,password:p}:{name:n,phone:c,password:p};let d=await api("/api/auth/register",{method:"POST",body:JSON.stringify(body)});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Cuenta creada ✓")}catch(e){toast(e.message)}};
 $("#login").onclick=async()=>{try{let d=await api("/api/auth/login",{method:"POST",body:JSON.stringify({identifier:$("#lc").value.trim(),password:$("#lp").value})});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Sesión iniciada ✓")}catch(e){toast(e.message)}};
 $$('[data-oauth]').forEach(b=>b.onclick=()=>{ window.location.href="/api/auth/google?action=login"; });
 $$('[data-link-oauth]').forEach(b=>b.onclick=()=>{ const provider=b.dataset.linkOauth; if(provider==="google") window.location.href="/api/auth/google?action=link"; });
-setInterval(()=>{
-  if(document.visibilityState!=="visible")return;
-  if(hotMode)return loadHot(false);
-  if(raceMode)return loadRaces(false);
-  if(feedMode==="virtual")return loadVirtualSport(sport);
-  if(feedMode==="football")return loadEvents(true);
-  if(feedMode==="catalog")return loadEvents(true);
-},15000);
+setInterval(updateSimulatedClocks,1000);
+setInterval(refreshMarketsOnly,40000);
 renderSlip();
 
 let supportTimer=null;
@@ -237,8 +252,6 @@ $("#passwordSubmit").onclick=async()=>{
 async function openPromos(){try{const d=await api('/api/promotions');const c=user?await api('/api/promo-calendar'):null;$('#promoList').innerHTML=d.promotions.length?d.promotions.map(p=>`<div class="bet-card"><b>🎁 ${escapeHtml(p.title)}</b><p>${escapeHtml(p.body)}</p><small>${p.bonus_cents?`Beneficio: ${money(p.bonus_cents)} · `:''}${p.min_deposit_cents?`Mínimo: ${money(p.min_deposit_cents)} · `:''}${escapeHtml(p.terms||'')}</small></div>`).join(''):'<div class=empty>No hay promociones activas.</div>';$('#promoCalendar').innerHTML=c?.days?.length?c.days.map(x=>`<div class="profile-row"><b>Día ${x.day_no}</b> · ${escapeHtml(x.title)}<small>${escapeHtml(x.reward_label)} · ${escapeHtml(x.body)}</small></div>`).join(''):'<div class=empty>Inicia sesión para consultar el calendario.</div>';$('#promoModal').classList.remove('hidden')}catch(e){toast(e.message)}}
 async function openNotifications(){if(!user)return openAuth();try{const d=await api('/api/notifications');$('#notifList').innerHTML=d.notifications.length?d.notifications.map(n=>`<div class="bet-card ${n.read_at?'':'unread'}"><b>${escapeHtml(n.title)}</b><p>${escapeHtml(n.body)}</p><small>${new Date(n.created_at).toLocaleString('es-MX')}</small>${!n.read_at?`<button class="social" data-read-notif="${n.id}">Marcar como leída</button>`:''}</div>`).join(''):'<div class=empty>No tienes notificaciones.</div>';$$('[data-read-notif]').forEach(b=>b.onclick=async()=>{await api('/api/notifications/'+b.dataset.readNotif+'/read',{method:'POST'});openNotifications()});$('#notifModal').classList.remove('hidden')}catch(e){toast(e.message)}}
 $('#closePromo')?.addEventListener('click',()=>$('#promoModal').classList.add('hidden'));$('#closeNotif')?.addEventListener('click',()=>$('#notifModal').classList.add('hidden'));
-$('#promoModal')?.addEventListener('click',e=>{if(e.target===e.currentTarget)e.currentTarget.classList.add('hidden')});
-$('#notifModal')?.addEventListener('click',e=>{if(e.target===e.currentTarget)e.currentTarget.classList.add('hidden')});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 async function bootSplash(){const splash=$('#splash');if(!splash)return;const status=$('#splashStatus');status.textContent='BetLive lista';setTimeout(()=>splash.classList.add('hidden'),700);Promise.allSettled([loadMe(),loadEvents(true)]).catch(()=>{});}
 bootSplash();
