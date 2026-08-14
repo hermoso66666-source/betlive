@@ -1416,11 +1416,15 @@ async function createHotEvent(startsAt,sport,slot,index){
   const eid=deterministicUuid(`hot:${sport}:${startsAt}:${index}:${slot}`);
   const league=HOT_CATEGORY_LABEL+" · 2H2";
   const stats=hotStatsFor({id:eid,live_elapsed:0,home_score:0,away_score:0});
+  const externalId=`hot:${sport}:${startsAt}`;
+  // Idempotent against concurrent HOT generators: the real uniqueness key is
+  // (external_source, external_id), not only the deterministic UUID.
   await pool.query(`INSERT INTO sports_events(id,sport,league,home_team,away_team,starts_at,status,home_score,away_score,featured,video,external_source,external_id,live_elapsed,live_status,score_source,score_confidence,hot_enabled,hot_locked,hot_stats,hot_rotation)
     VALUES($1,$2,$3,$4,$5,$6,'OPEN',0,0,FALSE,FALSE,'HOT_ENGINE',$7,0,'Próximo HOT','HOT_ENGINE',100,TRUE,FALSE,$8,$9)
-    ON CONFLICT(id) DO NOTHING`,
-    [eid,sport,league,pair.home,pair.away,startsAt,`hot:${sport}:${startsAt}`,JSON.stringify(stats),slot]);
-  const q=await pool.query("SELECT * FROM sports_events WHERE id=$1",[eid]);
+    ON CONFLICT (external_source,external_id) WHERE external_id IS NOT NULL DO NOTHING`,
+    [eid,sport,league,pair.home,pair.away,startsAt,externalId,JSON.stringify(stats),slot]);
+  // If another worker created it first, fetch that row instead of assuming our UUID won.
+  const q=await pool.query("SELECT * FROM sports_events WHERE external_source='HOT_ENGINE' AND external_id=$1 LIMIT 1",[externalId]);
   if(q.rows[0]) await ensureHotMarket(q.rows[0]);
   return eid;
 }
