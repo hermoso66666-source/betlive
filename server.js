@@ -489,6 +489,30 @@ app.get("/api/events/hot/upcoming",async(req,res)=>{
 });
 app.get("/api/events/races",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows});}catch(e){res.status(500).json({error:e.message})}});
 app.get("/api/races/upcoming",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status='OPEN' AND e.starts_at>=NOW() GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows});}catch(e){res.status(500).json({error:e.message})}});
+app.get("/api/football/live",async(req,res)=>{
+  try{
+    // HARD BOUNDARY: this endpoint is only for REAL football from API-Football.
+    // No virtual engine, HOT 2H2 module or race engine is queried here.
+    const {rows}=await pool.query(`
+      SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,
+             e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,
+             COALESCE(jsonb_agg(jsonb_build_object(
+               'marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,
+               'selections',(SELECT jsonb_agg(jsonb_build_object(
+                 'id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status
+               ) ORDER BY CASE WHEN s.code='L' THEN 1 WHEN s.code='E' THEN 2 WHEN s.code='V' THEN 3 ELSE 9 END,s.created_at)
+               FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')
+             ) ORDER BY CASE WHEN m.market_type='INTERNAL_LEV' THEN 0 ELSE 1 END,m.created_at)
+             FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets
+      FROM sports_events e
+      LEFT JOIN markets m ON m.event_id=e.id
+      WHERE e.sport='Fútbol' AND e.external_source='API_FOOTBALL' AND e.status='LIVE'
+      GROUP BY e.id ORDER BY e.live_elapsed DESC NULLS LAST,e.starts_at
+      LIMIT 200`);
+    res.json({events:rows,source:'API_FOOTBALL',scope:'REAL_FOOTBALL_ONLY'});
+  }catch(e){res.status(500).json({error:e.message,scope:'REAL_FOOTBALL_ONLY'})}
+});
+
 app.get("/api/events",async(req,res)=>{
   try{
     // Self-heal: the market engine is independent and should be able to repair
@@ -1013,7 +1037,7 @@ async function reconcileApiLiveEvents(items){
   let promoted=0;
   for(const item of items){
     if(item.status!=='LIVE') continue;
-    const q=await pool.query(`SELECT id,status FROM sports_events WHERE (external_source='API_FOOTBALL' AND external_id=$1) OR (lower(home_team)=lower($2) AND lower(away_team)=lower($3) AND abs(extract(epoch from (starts_at-$4::timestamptz)))<21600) ORDER BY CASE WHEN status='LIVE' THEN 0 ELSE 1 END LIMIT 1`,[item.externalId,item.home,item.away,item.startsAt]);
+    const q=await pool.query(`SELECT id,status FROM sports_events WHERE external_source='API_FOOTBALL' AND ((external_id=$1) OR (lower(home_team)=lower($2) AND lower(away_team)=lower($3) AND abs(extract(epoch from (starts_at-$4::timestamptz)))<21600)) ORDER BY CASE WHEN status='LIVE' THEN 0 ELSE 1 END LIMIT 1`,[item.externalId,item.home,item.away,item.startsAt]);
     if(q.rows[0] && q.rows[0].status!=='LIVE'){
       await pool.query(`UPDATE sports_events SET status='LIVE',home_score=$1,away_score=$2,live_elapsed=$3,live_status=$4,score_source='API_FOOTBALL',score_confidence=$5,score_updated_at=NOW(),last_synced_at=NOW() WHERE id=$6`,[Number(item.homeScore)||0,Number(item.awayScore)||0,item.elapsed??null,item.liveStatus||'EN VIVO',item.confidence||95,q.rows[0].id]);
       promoted++;
@@ -1395,7 +1419,7 @@ app.get("/api/health",async(req,res)=>{
         apiFootballOptional:true,
         source:"BETLIVE_ENGINE"
       },
-      hotEngine:{enabled:Boolean(virtualSportsManager),architecture:"independent-per-sport",intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00",database:virtualSportsManager?virtualSportsManager.health():[]},raceEngine:{enabled:RACE_ENABLED,intervalMinutes:5,durationMinutes:RACE_DURATION_MINUTES,rotationHours:RACE_ROTATION_HOURS,database:(await pool.query("SELECT COUNT(*) FILTER(WHERE race_enabled)::int total,COUNT(*) FILTER(WHERE race_enabled AND status='LIVE')::int live,COUNT(*) FILTER(WHERE race_enabled AND status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE race_enabled AND status='CLOSED')::int closed FROM sports_events")).rows[0]},databaseState:{
+      hotEngine:{enabled:Boolean(virtualSportsManager),architecture:"independent-per-sport",dataSource:"INTERNAL_ONLY",apiFootball:false,intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00",database:virtualSportsManager?virtualSportsManager.health():[]},raceEngine:{enabled:RACE_ENABLED,intervalMinutes:5,durationMinutes:RACE_DURATION_MINUTES,rotationHours:RACE_ROTATION_HOURS,database:(await pool.query("SELECT COUNT(*) FILTER(WHERE race_enabled)::int total,COUNT(*) FILTER(WHERE race_enabled AND status='LIVE')::int live,COUNT(*) FILTER(WHERE race_enabled AND status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE race_enabled AND status='CLOSED')::int closed FROM sports_events")).rows[0]},databaseState:{
         activeEvents:events.rows[0].n,
         liveEvents:live.rows[0].n,
         openInternalMarkets:markets.rows[0].n,

@@ -10,40 +10,50 @@ async function loadEvents(forceLive=true){
   const requestedSport=sport;
   try{
     hotMode=false;raceMode=false;liveOnly=forceLive;
-    const virtualSports=["Básquetbol","Béisbol","Tenis","Hockey"];
+    feedMode=requestedSport==='Todos'?'catalog':'football';
+    $('#events').classList.remove('hidden');$('#bets').classList.add('hidden');
+    $('#matches').innerHTML='<div class=empty>Cargando '+(requestedSport==='Todos'?'eventos':'fútbol en vivo')+'...</div>';
     let events=[];
-    // Never use the global football feed for virtual sports. Each module has its own endpoint.
-    if(requestedSport==="Todos"){
-      feedMode="catalog";
+    if(requestedSport==='Todos'){
       const results=await Promise.allSettled([
-        api('/api/events?live=true'),
+        api('/api/football/live'),
         api('/api/virtual/all?live=false')
       ]);
-      events=results.filter(r=>r.status==="fulfilled").flatMap(r=>r.value?.events||[]);
-      if(!events.length && results.every(r=>r.status!=="fulfilled")) throw new Error("No se pudo cargar ningún motor");
-    }else if(virtualSports.includes(requestedSport)){
-      feedMode="virtual";
-      // Virtual categories show their own OPEN/LIVE stream; they do not wait for real live data.
-      const d=await api(`/api/virtual/${encodeURIComponent(requestedSport)}?live=false`);
-      events=d.events||[];
-    }else if(requestedSport==="Fútbol"){
-      feedMode="football";
-      const d=await api('/api/events?live=true');
-      events=d.events||[];
+      events=results.filter(r=>r.status==='fulfilled').flatMap(r=>r.value?.events||[]);
+      if(!events.length && results.every(r=>r.status!=='fulfilled')) throw new Error('No se pudo cargar ningún módulo');
     }else{
-      feedMode="catalog";
+      const d=await api('/api/football/live');
+      events=d.events||[];
     }
-    // Ignore late responses from a previous category click.
-    if(sport!==requestedSport) return;
+    if(sport!==requestedSport)return;
     M=normalizeEvents(events);
-    $("#viewTitle").textContent=requestedSport==="Todos"?"🔴 EN VIVO + VIRTUALES":` ${requestedSport}`.trim();
-    $("#feedNotice").classList.add("hidden");
+    $('#viewTitle').textContent=requestedSport==='Todos'?'🔴 EN VIVO + VIRTUALES':'⚽ FÚTBOL · EN VIVO';
+    $('#feedNotice').classList.add('hidden');
     render();
   }catch(e){
     if(sport!==requestedSport)return;
-    M=[];
-    $("#count").textContent="0 eventos";
-    $("#matches").innerHTML=`<div class="empty">No se pudo cargar <b>${escapeHtml(requestedSport)}</b>.<br><small>${escapeHtml(e.message)}</small></div>`;
+    M=[];$('#count').textContent='0 eventos';
+    $('#matches').innerHTML=`<div class=empty>No se pudo cargar <b>${escapeHtml(requestedSport)}</b>.<br><small>${escapeHtml(e.message)}</small></div>`;
+    toast(e.message);
+  }
+}
+async function loadVirtualSport(selectedSport){
+  const requestedSport=selectedSport;
+  try{
+    hotMode=false;raceMode=false;feedMode='virtual';liveOnly=false;sport=requestedSport;
+    $('#events').classList.remove('hidden');$('#bets').classList.add('hidden');
+    $('#matches').innerHTML=`<div class=empty>Cargando ${escapeHtml(requestedSport)} simulado...</div>`;
+    const d=await api(`/api/virtual/${encodeURIComponent(requestedSport)}?live=false`);
+    if(sport!==requestedSport)return;
+    M=normalizeEvents(d.events||[]);
+    $('#viewTitle').textContent=`🎮 ${requestedSport.toUpperCase()} · SIMULADO`;
+    $('#feedNotice').textContent=`🎮 ${requestedSport} usa exclusivamente su motor virtual independiente. No consulta partidos reales ni API-Football.`;
+    $('#feedNotice').classList.remove('hidden');
+    render();
+  }catch(e){
+    if(sport!==requestedSport)return;
+    M=[];$('#count').textContent='0 eventos';
+    $('#matches').innerHTML=`<div class=empty>No se pudo cargar <b>${escapeHtml(requestedSport)}</b> simulado.<br><small>${escapeHtml(e.message)}</small></div>`;
     toast(e.message);
   }
 }
@@ -126,10 +136,17 @@ async function loadWithdrawalRequests(){
   }catch(e){toast(e.message)}
 }
 
-$$('[data-sport]').forEach(b=>b.onclick=()=>{hotMode=false;raceMode=false;sport=b.dataset.sport;$("#drawer").classList.add("hidden");loadEvents(true)});
+$$('[data-sport]').forEach(b=>b.onclick=()=>{
+  hotMode=false;raceMode=false;
+  const next=b.dataset.sport;
+  $('#drawer').classList.add('hidden');
+  if(['Básquetbol','Béisbol','Tenis','Hockey'].includes(next)) return loadVirtualSport(next);
+  sport=next;
+  return loadEvents(true);
+});
 $$('[data-hot]').forEach(b=>b.onclick=()=>{raceMode=false;loadHot(true)});$$('[data-races]').forEach(b=>b.onclick=()=>loadRaces(false));$$('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;$$('[data-filter]').forEach(x=>x.classList.toggle("active",x===b));render()});$("#search").oninput=render;$("#stake").oninput=renderSlip;$$('.quickmoney button').forEach(b=>b.onclick=()=>{$("#stake").value=Number(b.dataset.a);renderSlip()});$("#clear").onclick=()=>{slip=[];render()};$$('[data-type]').forEach(b=>b.onclick=()=>{type=b.dataset.type;$$('[data-type]').forEach(x=>x.classList.toggle("active",x===b));if(type==="single"&&slip.length>1)slip=slip.slice(-1);render()});
 $$('[data-tab]').forEach(b=>b.onclick=()=>{quickMode=b.dataset.tab==="quick";$("#normalPanel").classList.toggle("hidden",quickMode);$("#quickPanel").classList.toggle("hidden",!quickMode);$$('[data-tab]').forEach(x=>x.classList.toggle("active",x===b))});
-$("#menu").onclick=()=>$("#drawer").classList.remove("hidden");$("#closeDrawer").onclick=()=>$("#drawer").classList.add("hidden");$("#drawerLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadEvents(true)};$("#drawerUpcoming").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadUpcoming()};$("#showUpcoming").onclick=async()=>{hotMode=false;$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadUpcoming()};$("#showHotUpcoming").onclick=async()=>{raceMode=false;await loadHot(false)};$("#showRaceUpcoming").onclick=async()=>loadRaces(true);$("#drawerPromos").onclick=()=>openPromos();$("#drawerNotifications").onclick=()=>openNotifications();$("#drawerBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");$("#drawer").classList.add("hidden");loadTickets("all")};$("#drawerPending").onclick=()=>{$("#drawer").classList.add("hidden");loadWithdrawalRequests()};$("#drawerProfile").onclick=()=>{$("#drawer").classList.add("hidden");openProfile()};$("#drawerHelp").onclick=()=>{$("#drawer").classList.add("hidden");openSupport()};$("#mobileSlip").onclick=()=>$("#betSlip").classList.toggle("mobile-open");$("#ticketTop").onclick=()=>{if(window.innerWidth<=700)$("#mobileSlip").click();else document.querySelector(".slip").scrollIntoView({behavior:"smooth"})};
+$("#menu").onclick=()=>$("#drawer").classList.remove("hidden");$("#closeDrawer").onclick=()=>$("#drawer").classList.add("hidden");$("#drawerLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadEvents(true)};$("#drawerUpcoming").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");$("#drawer").classList.add("hidden");await loadUpcoming()};$("#showUpcoming").onclick=async()=>{hotMode=false;$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadUpcoming()};$("#showHotUpcoming").onclick=async()=>{raceMode=false;await loadHot(false)};$("#showRaceUpcoming").onclick=async()=>loadRaces(true);$("#drawerPromos").onclick=()=>{$('#drawer').classList.add('hidden');openPromos()};$("#drawerNotifications").onclick=()=>{$('#drawer').classList.add('hidden');openNotifications()};$("#drawerBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");$("#drawer").classList.add("hidden");loadTickets("all")};$("#drawerPending").onclick=()=>{$("#drawer").classList.add("hidden");loadWithdrawalRequests()};$("#drawerProfile").onclick=()=>{$("#drawer").classList.add("hidden");openProfile()};$("#drawerHelp").onclick=()=>{$("#drawer").classList.add("hidden");openSupport()};$("#mobileSlip").onclick=()=>$("#betSlip").classList.toggle("mobile-open");$("#ticketTop").onclick=()=>{if(window.innerWidth<=700)$("#mobileSlip").click();else document.querySelector(".slip").scrollIntoView({behavior:"smooth"})};
 $("#showBets").onclick=()=>{$("#events").classList.add("hidden");$("#bets").classList.remove("hidden");loadTickets("all")};$("#showLive").onclick=async()=>{$("#bets").classList.add("hidden");$("#events").classList.remove("hidden");await loadEvents(true)};
 function openAuth(){if(user){toast("Sesión activa");return}$("#auth").classList.remove("hidden");$("#loginBox").classList.remove("hidden");$("#registerBox").classList.add("hidden")}$("#account").onclick=openAuth;$("#closeAuth").onclick=()=>$("#auth").classList.add("hidden");$("#registerLink").onclick=()=>{$("#loginBox").classList.add("hidden");$("#registerBox").classList.remove("hidden")};$("#loginLink").onclick=()=>{$("#registerBox").classList.add("hidden");$("#loginBox").classList.remove("hidden")};
 $("#register").onclick=async()=>{try{let n=$("#rn").value.trim(),c=$("#rc").value.trim(),p=$("#rp").value;if(!n||!c||p.length<8)return toast("Completa los datos");let body=c.includes("@")?{name:n,email:c,password:p}:{name:n,phone:c,password:p};let d=await api("/api/auth/register",{method:"POST",body:JSON.stringify(body)});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Cuenta creada ✓")}catch(e){toast(e.message)}};
@@ -140,7 +157,7 @@ setInterval(()=>{
   if(document.visibilityState!=="visible")return;
   if(hotMode)return loadHot(false);
   if(raceMode)return loadRaces(false);
-  if(feedMode==="virtual")return loadEvents(false);
+  if(feedMode==="virtual")return loadVirtualSport(sport);
   if(feedMode==="football")return loadEvents(true);
   if(feedMode==="catalog")return loadEvents(true);
 },15000);
@@ -220,6 +237,8 @@ $("#passwordSubmit").onclick=async()=>{
 async function openPromos(){try{const d=await api('/api/promotions');const c=user?await api('/api/promo-calendar'):null;$('#promoList').innerHTML=d.promotions.length?d.promotions.map(p=>`<div class="bet-card"><b>🎁 ${escapeHtml(p.title)}</b><p>${escapeHtml(p.body)}</p><small>${p.bonus_cents?`Beneficio: ${money(p.bonus_cents)} · `:''}${p.min_deposit_cents?`Mínimo: ${money(p.min_deposit_cents)} · `:''}${escapeHtml(p.terms||'')}</small></div>`).join(''):'<div class=empty>No hay promociones activas.</div>';$('#promoCalendar').innerHTML=c?.days?.length?c.days.map(x=>`<div class="profile-row"><b>Día ${x.day_no}</b> · ${escapeHtml(x.title)}<small>${escapeHtml(x.reward_label)} · ${escapeHtml(x.body)}</small></div>`).join(''):'<div class=empty>Inicia sesión para consultar el calendario.</div>';$('#promoModal').classList.remove('hidden')}catch(e){toast(e.message)}}
 async function openNotifications(){if(!user)return openAuth();try{const d=await api('/api/notifications');$('#notifList').innerHTML=d.notifications.length?d.notifications.map(n=>`<div class="bet-card ${n.read_at?'':'unread'}"><b>${escapeHtml(n.title)}</b><p>${escapeHtml(n.body)}</p><small>${new Date(n.created_at).toLocaleString('es-MX')}</small>${!n.read_at?`<button class="social" data-read-notif="${n.id}">Marcar como leída</button>`:''}</div>`).join(''):'<div class=empty>No tienes notificaciones.</div>';$$('[data-read-notif]').forEach(b=>b.onclick=async()=>{await api('/api/notifications/'+b.dataset.readNotif+'/read',{method:'POST'});openNotifications()});$('#notifModal').classList.remove('hidden')}catch(e){toast(e.message)}}
 $('#closePromo')?.addEventListener('click',()=>$('#promoModal').classList.add('hidden'));$('#closeNotif')?.addEventListener('click',()=>$('#notifModal').classList.add('hidden'));
+$('#promoModal')?.addEventListener('click',e=>{if(e.target===e.currentTarget)e.currentTarget.classList.add('hidden')});
+$('#notifModal')?.addEventListener('click',e=>{if(e.target===e.currentTarget)e.currentTarget.classList.add('hidden')});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 async function bootSplash(){const splash=$('#splash');if(!splash)return;const status=$('#splashStatus');status.textContent='BetLive lista';setTimeout(()=>splash.classList.add('hidden'),700);Promise.allSettled([loadMe(),loadEvents(true)]).catch(()=>{});}
 bootSplash();

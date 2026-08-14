@@ -1,1 +1,1 @@
-V16 — Modular sports isolation cleanup
+V19 — Strict routing and real-football/API-Football boundary; virtual sports isolated

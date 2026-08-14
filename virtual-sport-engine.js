@@ -121,8 +121,7 @@ export function createVirtualSportEngine({pool,deterministicUuid,config}){
 
 export function createVirtualSportsManager({pool,deterministicUuid}){
   const configs=[
-    // HOT 2H2 football is a separate internal module. Real football remains exclusively
-    // under API-Football in server.js and never shares this engine's event feed.
+    // HOT 2H2 football is a separate internal simulation module.
     {sport:'Fútbol',source:'HOT_FOOTBALL',marketType:'HOT_FOOTBALL_2H2',startHour:0,endHour:24,pairPool:[['Aston Avila','New Castel'],['Madri Nova','Barceluna'],['Munich Red','Paris Azul'],['Milan Norte','Londres City']],scoreModel:(m,s)=>[Math.min(9,Math.floor(1+m*.55+(s%3))),Math.min(9,Math.floor(1+m*.48+((s>>3)%3)))]},
     {sport:'Básquetbol',source:'HOT_BASKETBALL',marketType:'HOT_BASKETBALL_2H2',pairPool:[['Los Angeles Stars','Boston Greens'],['Golden Bay','Chicago Bullsmen'],['Miami Waves','New York Knights'],['Dallas Rockets','Phoenix Sunside']],scoreModel:(m,s)=>[Math.min(99,Math.floor(8+m*2.4+(s%5))),Math.min(99,Math.floor(7+m*2.2+((s>>3)%5)))]},
     {sport:'Béisbol',source:'HOT_BASEBALL',marketType:'HOT_BASEBALL_2H2',pairPool:[['Los Angeles Bats','New York Kings'],['Boston Redcaps','Chicago Cubsmen'],['Texas Rangers FC','Miami Marlinside'],['San Diego Padres Club','Atlanta Bravesmen']],scoreModel:(m,s)=>[Math.min(8,Math.floor(((s%8)+m)/6)),Math.min(8,Math.floor((((s>>5)%8)+m)/7))]},

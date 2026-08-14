@@ -1,1 +1,1 @@
-V16 — Independent per-sport virtual engines; HOT football module added; real football remains API-Football-only
+V19 — Independent virtual engines; no API-Football dependency in simulated modules
