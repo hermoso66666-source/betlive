@@ -40,7 +40,14 @@ app.use(express.json({limit:"100kb"}));
 app.use(cookieParser());
 
 if(!process.env.DATABASE_URL) console.warn("DATABASE_URL no configurado");
-const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==="production"?{rejectUnauthorized:false}:false});
+const pool=new Pool({
+  connectionString:process.env.DATABASE_URL,
+  ssl:process.env.NODE_ENV==="production"?{rejectUnauthorized:false}:false,
+  max:10,
+  connectionTimeoutMillis:5000,
+  idleTimeoutMillis:30000
+});
+pool.on("error",err=>console.error("BetLive PostgreSQL pool error:",err?.message||err));
 const VIRTUAL_SPORTS=["Fútbol","Básquetbol","Béisbol","Tenis","Hockey"];
 let virtualSportsManager=null;
 const JWT_SECRET=process.env.JWT_SECRET;
@@ -1415,6 +1422,11 @@ app.get("/api/heath",async(req,res)=>{
   return res.redirect(307,"/api/health");
 });
 app.get("/api/health",async(req,res)=>{
+  // Render must be able to verify the web process while PostgreSQL is still connecting.
+  // Never make the platform health check wait on a database connection.
+  if(!dbReady){
+    return res.status(200).json({ok:true,database:false,starting:true,service:"betlive"});
+  }
   try{
     const [events,live,markets,selections]=await Promise.all([
       pool.query("SELECT COUNT(*)::int n FROM sports_events WHERE status IN ('OPEN','LIVE')"),
@@ -1499,11 +1511,22 @@ app.get("/admin.html",(req,res)=>res.sendFile(path.join(__dirname,"admin.html"))
 app.use(express.static(path.join(__dirname,".")));
 app.use("/api",(req,res)=>res.status(404).json({error:"Endpoint no encontrado"}));
 app.get("/{*splat}",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
-app.listen(PORT,()=>{console.log("BetLive API escuchando en "+PORT);dbInit().then(async()=>{
-  await ensureBootstrapAdmin();dbReady=true;console.log("Base de datos inicializada correctamente");
-  startLiveSync();
-  virtualSportsManager=createVirtualSportsManager({pool,deterministicUuid});
-  await virtualSportsManager.startAll();
-  startRaceEngine();
-  startAutoSettlement();
-}).catch(e=>console.error("Error inicializando la base de datos:",e))});
+const server=app.listen(PORT,()=>{
+  console.log("BetLive API escuchando en "+PORT);
+  dbInit().then(async()=>{
+    await ensureBootstrapAdmin();
+    dbReady=true;
+    console.log("Base de datos inicializada correctamente");
+    startLiveSync();
+    virtualSportsManager=createVirtualSportsManager({pool,deterministicUuid});
+    await virtualSportsManager.startAll();
+    startRaceEngine();
+    startAutoSettlement();
+  }).catch(e=>{
+    // Keep the HTTP process alive so Render does not enter a restart loop.
+    // The next deployment/restart will retry database initialization.
+    dbReady=false;
+    console.error("Error inicializando la base de datos:",e?.stack||e?.message||e);
+  });
+});
+server.on("error",err=>console.error("BetLive HTTP server error:",err?.stack||err?.message||err));
