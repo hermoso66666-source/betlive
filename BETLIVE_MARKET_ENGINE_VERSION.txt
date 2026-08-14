@@ -1,1 +1,1 @@
-BetLive HOT 2H2 integrated preview v13.1
+V16 — Football-only real market pipeline; virtual engines isolated from API-Football

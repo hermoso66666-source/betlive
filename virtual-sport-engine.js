@@ -116,16 +116,19 @@ export function createVirtualSportEngine({pool,deterministicUuid,config}){
   }
   async function start(){try{await seed();await advance();}catch(e){state.lastError=e.message;console.error(`${cfg.sport} engine bootstrap:`,e.message)}setInterval(()=>advance().catch(e=>{state.lastError=e.message;console.error(`${cfg.sport} engine cycle:`,e.message)}),60000);}
   async function list(live=false){const q=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id AND m.market_type=$1 WHERE e.external_source=$2 AND e.status IN ('OPEN','LIVE') AND ($3::boolean=false OR e.status='LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 200`,[cfg.marketType,cfg.source,live]);return q.rows;}
-  return {config:cfg,state,list,start,seed,advance};
+  return {config:cfg,state,list,start,seed,advance,ensureMarkets};
 }
 
 export function createVirtualSportsManager({pool,deterministicUuid}){
   const configs=[
+    // HOT 2H2 football is a separate internal module. Real football remains exclusively
+    // under API-Football in server.js and never shares this engine's event feed.
+    {sport:'Fútbol',source:'HOT_FOOTBALL',marketType:'HOT_FOOTBALL_2H2',startHour:0,endHour:24,pairPool:[['Aston Avila','New Castel'],['Madri Nova','Barceluna'],['Munich Red','Paris Azul'],['Milan Norte','Londres City']],scoreModel:(m,s)=>[Math.min(9,Math.floor(1+m*.55+(s%3))),Math.min(9,Math.floor(1+m*.48+((s>>3)%3)))]},
     {sport:'Básquetbol',source:'HOT_BASKETBALL',marketType:'HOT_BASKETBALL_2H2',pairPool:[['Los Angeles Stars','Boston Greens'],['Golden Bay','Chicago Bullsmen'],['Miami Waves','New York Knights'],['Dallas Rockets','Phoenix Sunside']],scoreModel:(m,s)=>[Math.min(99,Math.floor(8+m*2.4+(s%5))),Math.min(99,Math.floor(7+m*2.2+((s>>3)%5)))]},
     {sport:'Béisbol',source:'HOT_BASEBALL',marketType:'HOT_BASEBALL_2H2',pairPool:[['Los Angeles Bats','New York Kings'],['Boston Redcaps','Chicago Cubsmen'],['Texas Rangers FC','Miami Marlinside'],['San Diego Padres Club','Atlanta Bravesmen']],scoreModel:(m,s)=>[Math.min(8,Math.floor(((s%8)+m)/6)),Math.min(8,Math.floor((((s>>5)%8)+m)/7))]},
     {sport:'Tenis',source:'HOT_TENNIS',marketType:'HOT_TENNIS_2H2',pairPool:[['Madrid Open','London Aces'],['Paris Smash','New York Serve'],['Roma Masters','Tokyo Rackets'],['Miami Open','Toronto Nets']],scoreModel:(m,s)=>[Math.min(3,Math.floor(((s%5)+m)/4)),Math.min(3,Math.floor((((s>>5)%5)+m)/5))]},
     {sport:'Hockey',source:'HOT_HOCKEY',marketType:'HOT_HOCKEY_2H2',pairPool:[['Toronto Ice','Montreal North'],['New York Blades','Boston Frost'],['Dallas Wolves','Colorado Peaks'],['Detroit Motors','Chicago Ice']],scoreModel:(m,s)=>[Math.min(8,Math.floor(1+m*.5+(s%3))),Math.min(8,Math.floor(1+m*.45+((s>>4)%3)))]}
   ].map(c=>createVirtualSportEngine({pool,deterministicUuid,config:c}));
   const bySport=new Map(configs.map(e=>[e.config.sport,e]));
-  return {engines:configs,bySport,startAll:async()=>Promise.all(configs.map(e=>e.start())),list:async(sport,live=false)=>bySport.get(sport)?.list(live)||[],health:()=>configs.map(e=>({sport:e.config.sport,source:e.config.source,marketType:e.config.marketType,state:e.state}))};
+  return {engines:configs,bySport,startAll:async()=>Promise.all(configs.map(e=>e.start())),list:async(sport,live=false)=>bySport.get(sport)?.list(live)||[],engineForEvent:externalSource=>configs.find(e=>e.config.source===externalSource)||null,health:()=>configs.map(e=>({sport:e.config.sport,source:e.config.source,marketType:e.config.marketType,state:e.state}))};
 }

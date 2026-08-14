@@ -12,13 +12,22 @@ async function loadEvents(forceLive=true){
     const virtualSports=["Básquetbol","Béisbol","Tenis","Hockey"];
     let events=[];
     if(sport==="Todos"){
-      const real=await api(`/api/events?live=${forceLive}`);
-      const virtual=await Promise.all(virtualSports.map(x=>api(`/api/virtual/${encodeURIComponent(x)}?live=${forceLive}`)));
-      events=[...(real.events||[]),...virtual.flatMap(x=>x.events||[])];
+      // Independent modules: one failed virtual sport must not break the rest of the catalog.
+      const results=await Promise.allSettled([
+        api(`/api/events?live=${forceLive}`),
+        ...virtualSports.map(x=>api(`/api/virtual/${encodeURIComponent(x)}?live=${forceLive}`))
+      ]);
+      events=results.filter(r=>r.status==="fulfilled").flatMap(r=>r.value?.events||[]);
+      if(!results.some(r=>r.status==="fulfilled")) throw new Error("No se pudo cargar ningún motor");
     }else if(virtualSports.includes(sport)){
-      const d=await api(`/api/virtual/${encodeURIComponent(sport)}?live=${forceLive}`);events=d.events||[];
+      const d=await api(`/api/virtual/${encodeURIComponent(sport)}?live=${forceLive}`);
+      events=d.events||[];
+    }else if(sport==="Fútbol"){
+      // Only this branch touches the real football/API-Football event feed.
+      const d=await api(`/api/events?live=${forceLive}`);
+      events=d.events||[];
     }else{
-      const d=await api(`/api/events?live=${forceLive}`);events=d.events||[];
+      events=[];
     }
     M=normalizeEvents(events);$("#viewTitle").textContent=sport==="Todos"?(forceLive?"🔴 EN VIVO AHORA":"EVENTOS"):`${forceLive?"🔴":"📅"} ${sport}`;$("#feedNotice").classList.add("hidden");render();
   }catch(e){toast(e.message)}
@@ -26,7 +35,7 @@ async function loadEvents(forceLive=true){
 async function loadUpcoming(){try{hotMode=false;raceMode=false;feedMode="upcoming";liveOnly=false;$("#matches").innerHTML="<div class=empty>Cargando partidos reales...</div>";const d=await api("/api/events/upcoming-real");M=normalizeEvents(d.events);$("#viewTitle").textContent="📅 PRÓXIMOS PARTIDOS";const src=d.source||"BETLIVE";$("#feedNotice").textContent=d.error?`BetLive conserva los partidos disponibles. Fuente adicional no disponible: ${d.error}`:`Fuente: ${src}. Los mercados internos de BetLive no dependen de las cuotas externas.`;$("#feedNotice").classList.remove("hidden");render()}catch(e){$("#matches").innerHTML=`<div class=empty>No se pudieron cargar los próximos partidos.<br><small>${escapeHtml(e.message)}</small><br><button id="retryUpcoming" class="red" style="margin-top:12px">Reintentar</button></div>`;const b=$("#retryUpcoming");if(b)b.onclick=loadUpcoming;toast(e.message)}}
 async function loadHot(live=true){
   try{
-    hotMode=true;feedMode=live?"hot-live":"hot-upcoming";liveOnly=live;sport="Todos";
+    hotMode=true;raceMode=false;feedMode=live?"hot-live":"hot-upcoming";liveOnly=live;
     $("#events").classList.remove("hidden");$("#bets").classList.add("hidden");
     $("#matches").innerHTML="<div class=empty>Cargando HOT 2H2...</div>";
     const d=await api(live?"/api/events/hot?live=true":"/api/events/hot/upcoming");
