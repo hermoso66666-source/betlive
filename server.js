@@ -124,6 +124,7 @@ import path from "path";
 import {fileURLToPath} from "url";
 import { generateLEVMarket } from "./lev-engine.js";
 import { normalizeScoreFeed, chooseScoreSnapshot, canonicalEventKey } from "./score-engine.js";
+import { createVirtualSportsManager } from "./virtual-sport-engine.js";
 
 const {Pool}=pg;
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
@@ -135,6 +136,8 @@ app.use(cookieParser());
 
 if(!process.env.DATABASE_URL) console.warn("DATABASE_URL no configurado");
 const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==="production"?{rejectUnauthorized:false}:false});
+const VIRTUAL_SPORTS=["Fútbol","Básquetbol","Béisbol","Tenis","Hockey"];
+let virtualSportsManager=null;
 const JWT_SECRET=process.env.JWT_SECRET;
 if(!JWT_SECRET) console.warn("JWT_SECRET no configurado");
 const PORT=process.env.PORT||10000;
@@ -550,39 +553,33 @@ app.post("/api/auth/logout",auth,(req,res)=>{res.clearCookie("bl_session",{httpO
 app.get("/api/me",auth,(req,res)=>res.json({user:req.user}));
 
 // Public catalog
+app.get("/api/virtual/:sport",async(req,res)=>{
+  try{
+    const sport=decodeURIComponent(req.params.sport);
+    if(!virtualSportsManager || !VIRTUAL_SPORTS.includes(sport)) return res.status(404).json({error:"Motor virtual no disponible",sport});
+    const live=String(req.query.live||"true")==="true";
+    const events=await virtualSportsManager.list(sport,live);
+    res.json({events,source:`${sport.toUpperCase()}_ENGINE`,category:"HOT 2H2",engine:sport});
+  }catch(e){res.status(500).json({error:e.message})}
+});
+app.get("/api/virtual/all",async(req,res)=>{
+  try{
+    const live=String(req.query.live||"true")==="true";
+    const events=(await Promise.all(VIRTUAL_SPORTS.map(s=>virtualSportsManager.list(s,live)))).flat().sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at));
+    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2",engines:VIRTUAL_SPORTS});
+  }catch(e){res.status(500).json({error:e.message})}
+});
 app.get("/api/events/hot",async(req,res)=>{
   try{
-    let engineWarning=null;
-    try{await advanceHotEvents();}catch(err){engineWarning=err.message;console.error("HOT public feed cycle:",err.message)}
     const live=String(req.query.live||"true")==="true";
-    const {rows}=await pool.query(`
-      SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,e.hot_stats,
-      COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',
-        (SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at)
-         FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')) ORDER BY m.created_at)
-        FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets
-      FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id
-      WHERE e.hot_enabled=TRUE AND e.status IN ('OPEN','LIVE') AND ($1::boolean=FALSE OR e.status='LIVE')
-      GROUP BY e.id ORDER BY e.starts_at LIMIT 250
-    `,[live]);
-    res.json({events:rows,source:"HOT_ENGINE",category:HOT_CATEGORY_LABEL,intervalMs:HOT_INTERVAL_MS,durationMinutes:HOT_DURATION_MINUTES,warning:engineWarning});
+    const events=virtualSportsManager? (await Promise.all(VIRTUAL_SPORTS.map(s=>virtualSportsManager.list(s,live)))).flat().sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at)) : [];
+    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2",intervalMs:HOT_INTERVAL_MS,durationMinutes:HOT_DURATION_MINUTES});
   }catch(e){res.status(500).json({error:e.message})}
 });
 app.get("/api/events/hot/upcoming",async(req,res)=>{
   try{
-    let engineWarning=null;
-    try{await advanceHotEvents();}catch(err){engineWarning=err.message;console.error("HOT upcoming cycle:",err.message)}
-    const {rows}=await pool.query(`
-      SELECT e.id,e.sport,e.league,e.home_team,e.away_team,e.starts_at,e.status,e.home_score,e.away_score,e.featured,e.video,e.live_elapsed,e.live_status,e.external_source,e.hot_stats,
-      COALESCE(jsonb_agg(jsonb_build_object('marketId',m.id,'name',m.name,'type',m.market_type,'status',m.status,'selections',
-        (SELECT jsonb_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at)
-         FROM market_selections s WHERE s.market_id=m.id AND s.status='OPEN')) ORDER BY m.created_at)
-        FILTER(WHERE m.id IS NOT NULL AND m.status='OPEN'),'[]'::jsonb) markets
-      FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id
-      WHERE e.hot_enabled=TRUE AND e.status='OPEN' AND e.starts_at>=NOW()
-      GROUP BY e.id ORDER BY e.starts_at LIMIT 250
-    `);
-    res.json({events:rows,source:"HOT_ENGINE",category:HOT_CATEGORY_LABEL});
+    const events=virtualSportsManager?(await Promise.all(VIRTUAL_SPORTS.map(s=>virtualSportsManager.list(s,false)))).flat().sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at)):[];
+    res.json({events,source:"INDEPENDENT_VIRTUAL_ENGINES",category:"HOT 2H2"});
   }catch(e){res.status(500).json({error:e.message})}
 });
 app.get("/api/events/races",async(req,res)=>{try{const {rows}=await pool.query(`SELECT e.*,COALESCE(json_agg(DISTINCT jsonb_build_object('id',m.id,'name',m.name,'market_type',m.market_type,'status',m.status,'selections',(SELECT COALESCE(json_agg(jsonb_build_object('id',s.id,'label',s.label,'code',s.code,'odds',s.odds,'status',s.status) ORDER BY s.created_at),'[]'::json) FROM market_selections s WHERE s.market_id=m.id))) FILTER(WHERE m.id IS NOT NULL),'[]'::json) markets FROM sports_events e LEFT JOIN markets m ON m.event_id=e.id WHERE e.race_enabled=TRUE AND e.status IN ('OPEN','LIVE') GROUP BY e.id ORDER BY e.starts_at LIMIT 100`);res.json({events:rows});}catch(e){res.status(500).json({error:e.message})}});
@@ -1572,7 +1569,7 @@ app.get("/api/health",async(req,res)=>{
         apiFootballOptional:true,
         source:"BETLIVE_ENGINE"
       },
-      hotEngine:{enabled:HOT_ENABLED,intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00",database:hotState},raceEngine:{enabled:RACE_ENABLED,intervalMinutes:5,durationMinutes:RACE_DURATION_MINUTES,rotationHours:RACE_ROTATION_HOURS,database:(await pool.query("SELECT COUNT(*) FILTER(WHERE race_enabled)::int total,COUNT(*) FILTER(WHERE race_enabled AND status='LIVE')::int live,COUNT(*) FILTER(WHERE race_enabled AND status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE race_enabled AND status='CLOSED')::int closed FROM sports_events")).rows[0]},databaseState:{
+      hotEngine:{enabled:Boolean(virtualSportsManager),architecture:"independent-per-sport",intervalMinutes:4,durationMinutes:8,rotationHours:4,footballHours:"24/7",otherHours:"08:00-20:00",database:virtualSportsManager?virtualSportsManager.health():[]},raceEngine:{enabled:RACE_ENABLED,intervalMinutes:5,durationMinutes:RACE_DURATION_MINUTES,rotationHours:RACE_ROTATION_HOURS,database:(await pool.query("SELECT COUNT(*) FILTER(WHERE race_enabled)::int total,COUNT(*) FILTER(WHERE race_enabled AND status='LIVE')::int live,COUNT(*) FILTER(WHERE race_enabled AND status='OPEN')::int upcoming,COUNT(*) FILTER(WHERE race_enabled AND status='CLOSED')::int closed FROM sports_events")).rows[0]},databaseState:{
         activeEvents:events.rows[0].n,
         liveEvents:live.rows[0].n,
         openInternalMarkets:markets.rows[0].n,
@@ -1634,6 +1631,7 @@ app.get("/{*splat}",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
 app.listen(PORT,()=>{console.log("BetLive API escuchando en "+PORT);dbInit().then(async()=>{
   await ensureBootstrapAdmin();dbReady=true;console.log("Base de datos inicializada correctamente");
   startLiveSync();
-  startHotEngine();
+  virtualSportsManager=createVirtualSportsManager({pool,deterministicUuid});
+  await virtualSportsManager.startAll();
   startRaceEngine();
 }).catch(e=>console.error("Error inicializando la base de datos:",e))});

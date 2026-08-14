@@ -4,9 +4,25 @@ async function api(url,opt={}){let r=await fetch(url,{credentials:"same-origin",
 function normalizeEvents(events){return events.map(e=>{
   const markets=(e.markets||[]).map(m=>({...m,selections:(m.selections||[]).map(s=>({...s,odds:Number(s.odds)}))}));
   const odds=markets.flatMap(m=>(m.selections||[]).map(s=>({id:s.id,label:`${m.name}: ${s.label}`,code:s.code,odd:Number(s.odds),status:s.status,marketName:m.name,marketId:m.id})));
-  return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,hotStats:e.hot_stats||null,raceStats:e.race_stats||null,hot:e.hot_enabled===true||e.external_source==="HOT_ENGINE",race:e.race_enabled===true||e.external_source==="RACE_ENGINE",markets,odds}
+  return{id:e.id,sport:e.sport,league:e.league,home:e.home_team,away:e.away_team,score:[e.home_score||0,e.away_score||0],featured:e.featured,video:e.video,status:e.status,startsAt:e.starts_at,liveElapsed:e.live_elapsed,liveStatus:e.live_status,source:e.external_source,hotStats:e.hot_stats||null,raceStats:e.race_stats||null,hot:e.hot_enabled===true||String(e.external_source||"").startsWith("HOT_")||e.external_source==="HOT_ENGINE",race:e.race_enabled===true||e.external_source==="RACE_ENGINE",markets,odds}
 })}
-async function loadEvents(forceLive=true){try{hotMode=false;raceMode=false;feedMode=forceLive?"live":"all";liveOnly=forceLive;const d=await api(`/api/events?live=${forceLive}`);M=normalizeEvents(d.events);$("#viewTitle").textContent=forceLive?"🔴 EN VIVO AHORA":"EVENTOS";$("#feedNotice").classList.add("hidden");render()}catch(e){toast(e.message)}}
+async function loadEvents(forceLive=true){
+  try{
+    hotMode=false;raceMode=false;feedMode=forceLive?"live":"all";liveOnly=forceLive;
+    const virtualSports=["Básquetbol","Béisbol","Tenis","Hockey"];
+    let events=[];
+    if(sport==="Todos"){
+      const real=await api(`/api/events?live=${forceLive}`);
+      const virtual=await Promise.all(virtualSports.map(x=>api(`/api/virtual/${encodeURIComponent(x)}?live=${forceLive}`)));
+      events=[...(real.events||[]),...virtual.flatMap(x=>x.events||[])];
+    }else if(virtualSports.includes(sport)){
+      const d=await api(`/api/virtual/${encodeURIComponent(sport)}?live=${forceLive}`);events=d.events||[];
+    }else{
+      const d=await api(`/api/events?live=${forceLive}`);events=d.events||[];
+    }
+    M=normalizeEvents(events);$("#viewTitle").textContent=sport==="Todos"?(forceLive?"🔴 EN VIVO AHORA":"EVENTOS"):`${forceLive?"🔴":"📅"} ${sport}`;$("#feedNotice").classList.add("hidden");render();
+  }catch(e){toast(e.message)}
+}
 async function loadUpcoming(){try{hotMode=false;raceMode=false;feedMode="upcoming";liveOnly=false;$("#matches").innerHTML="<div class=empty>Cargando partidos reales...</div>";const d=await api("/api/events/upcoming-real");M=normalizeEvents(d.events);$("#viewTitle").textContent="📅 PRÓXIMOS PARTIDOS";const src=d.source||"BETLIVE";$("#feedNotice").textContent=d.error?`BetLive conserva los partidos disponibles. Fuente adicional no disponible: ${d.error}`:`Fuente: ${src}. Los mercados internos de BetLive no dependen de las cuotas externas.`;$("#feedNotice").classList.remove("hidden");render()}catch(e){$("#matches").innerHTML=`<div class=empty>No se pudieron cargar los próximos partidos.<br><small>${escapeHtml(e.message)}</small><br><button id="retryUpcoming" class="red" style="margin-top:12px">Reintentar</button></div>`;const b=$("#retryUpcoming");if(b)b.onclick=loadUpcoming;toast(e.message)}}
 async function loadHot(live=true){
   try{
@@ -96,7 +112,7 @@ $("#register").onclick=async()=>{try{let n=$("#rn").value.trim(),c=$("#rc").valu
 $("#login").onclick=async()=>{try{let d=await api("/api/auth/login",{method:"POST",body:JSON.stringify({identifier:$("#lc").value.trim(),password:$("#lp").value})});user=d.user;$("#auth").classList.add("hidden");await loadMe();renderSlip();toast("Sesión iniciada ✓")}catch(e){toast(e.message)}};
 $$('[data-oauth]').forEach(b=>b.onclick=()=>{ window.location.href="/api/auth/google?action=login"; });
 $$('[data-link-oauth]').forEach(b=>b.onclick=()=>{ const provider=b.dataset.linkOauth; if(provider==="google") window.location.href="/api/auth/google?action=link"; });
-setInterval(()=>{if(hotMode)loadHot(liveOnly);else if(raceMode)loadRaces(!liveOnly);else loadEvents(liveOnly)},15000);
+setInterval(()=>{if(document.visibilityState!=="visible")return;if(hotMode)loadHot(liveOnly);else if(raceMode)loadRaces(!liveOnly);else if(["live","all"].includes(feedMode))loadEvents(liveOnly)},15000);
 renderSlip();
 
 let supportTimer=null;
@@ -174,5 +190,5 @@ async function openPromos(){try{const d=await api('/api/promotions');const c=use
 async function openNotifications(){if(!user)return openAuth();try{const d=await api('/api/notifications');$('#notifList').innerHTML=d.notifications.length?d.notifications.map(n=>`<div class="bet-card ${n.read_at?'':'unread'}"><b>${escapeHtml(n.title)}</b><p>${escapeHtml(n.body)}</p><small>${new Date(n.created_at).toLocaleString('es-MX')}</small>${!n.read_at?`<button class="social" data-read-notif="${n.id}">Marcar como leída</button>`:''}</div>`).join(''):'<div class=empty>No tienes notificaciones.</div>';$$('[data-read-notif]').forEach(b=>b.onclick=async()=>{await api('/api/notifications/'+b.dataset.readNotif+'/read',{method:'POST'});openNotifications()});$('#notifModal').classList.remove('hidden')}catch(e){toast(e.message)}}
 $('#closePromo')?.addEventListener('click',()=>$('#promoModal').classList.add('hidden'));$('#closeNotif')?.addEventListener('click',()=>$('#notifModal').classList.add('hidden'));
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
-async function bootSplash(){const splash=$('#splash');if(!splash)return;const status=$('#splashStatus');let ready=false;try{await Promise.race([api('/api/health'),new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),10000))]);ready=true;status.textContent='BetLive lista';}catch{status.textContent='Cargando BetLive...';}try{await loadMe();await loadEvents(true)}catch{}setTimeout(()=>splash.classList.add('hidden'),ready?250:900);}
+async function bootSplash(){const splash=$('#splash');if(!splash)return;const status=$('#splashStatus');status.textContent='BetLive lista';setTimeout(()=>splash.classList.add('hidden'),700);Promise.allSettled([loadMe(),loadEvents(true)]).catch(()=>{});}
 bootSplash();
